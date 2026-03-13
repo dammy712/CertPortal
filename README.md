@@ -8,3 +8,5 @@ Settings now stored in a JSON file — no Prisma model needed.
 
 ## No --build needed. Nodemon will restart automatically on save.
 # CertPortal
+
+This is beautiful
