@@ -1,0 +1,509 @@
+// This is your Prisma schema file
+// Module 2: Complete Database Schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────
+
+enum UserRole {
+  CUSTOMER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+}
+
+enum KycStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum DocumentType {
+  NATIONAL_ID
+  PASSPORT
+  DRIVERS_LICENSE
+  UTILITY_BILL
+  BANK_STATEMENT
+  CAC_CERTIFICATE
+  CAC_FORM_CO7
+  CERTIFICATE_OF_INCORPORATION
+  GOVERNMENT_ID
+  CAC_DOCUMENT
+  OTHER
+}
+
+enum CertificateType {
+  DV
+  DV_MULTIDOMAIN
+  DV_WILDCARD
+  OV
+  OV_MULTIDOMAIN
+  OV_WILDCARD
+  EV
+  EV_MULTIDOMAIN
+}
+
+enum ValidityPeriod {
+  ONE_YEAR
+  TWO_YEARS
+  THREE_YEARS
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PENDING_VALIDATION
+  VALIDATING
+  PENDING_ISSUANCE
+  ISSUED
+  CANCELLED
+  REFUNDED
+  EXPIRED
+}
+
+enum DomainValidationMethod {
+  EMAIL
+  DNS_TXT
+  DNS_CNAME
+  HTTP_FILE
+}
+
+enum DomainValidationStatus {
+  PENDING
+  IN_PROGRESS
+  VALIDATED
+  FAILED
+  EXPIRED
+}
+
+enum TransactionType {
+  WALLET_FUNDING
+  CERTIFICATE_PURCHASE
+  REFUND
+  ADMIN_ADJUSTMENT
+}
+
+enum TransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+enum NotificationChannel {
+  EMAIL
+  IN_APP
+}
+
+enum NotificationType {
+  CERT_EXPIRY_90
+  CERT_EXPIRY_60
+  CERT_EXPIRY_30
+  CERT_EXPIRY_7
+  CERT_ISSUED
+  ORDER_UPDATE
+  KYC_UPDATE
+  WALLET_FUNDED
+  SYSTEM
+}
+
+enum AuditAction {
+  USER_LOGIN
+  USER_LOGOUT
+  USER_REGISTER
+  USER_2FA_ENABLED
+  USER_2FA_DISABLED
+  PASSWORD_CHANGED
+  KYC_SUBMITTED
+  KYC_APPROVED
+  KYC_REJECTED
+  ORDER_CREATED
+  ORDER_CANCELLED
+  WALLET_FUNDED
+  WALLET_ADJUSTED
+  CERT_DOWNLOADED
+  CERT_CONVERTED
+  ADMIN_ACTION
+}
+
+// ─────────────────────────────────────────
+// USER & AUTH
+// ─────────────────────────────────────────
+
+model User {
+  id                String     @id @default(uuid())
+  email             String     @unique
+  passwordHash      String
+  firstName         String
+  lastName          String
+  phone             String?
+  role              UserRole   @default(CUSTOMER)
+  status            UserStatus @default(PENDING_VERIFICATION)
+  emailVerified     Boolean    @default(false)
+  emailVerifyToken  String?
+  passwordResetToken String?
+  passwordResetExpiry DateTime?
+
+  // 2FA
+  twoFactorEnabled  Boolean    @default(false)
+  twoFactorSecret   String?
+  backupCodes       String[]   // hashed backup codes
+
+  // Preferences
+  darkMode          Boolean    @default(false)
+  timezone          String     @default("UTC")
+
+  // Relations
+  organization      Organization?   @relation(fields: [organizationId], references: [id])
+  organizationId    String?
+  wallet            Wallet?
+  orders            CertificateOrder[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+  kycDocuments      KycDocument[]
+  refreshTokens     RefreshToken[]
+  sessions          Session[]
+
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  @@index([email])
+  @@index([organizationId])
+  @@map("users")
+}
+
+model RefreshToken {
+  id          String   @id @default(uuid())
+  token       String   @unique
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt   DateTime
+  revoked     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([token])
+  @@map("refresh_tokens")
+}
+
+model Session {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ipAddress   String?
+  userAgent   String?
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// ─────────────────────────────────────────
+// ORGANIZATION & KYC
+// ─────────────────────────────────────────
+
+model Organization {
+  id              String     @id @default(uuid())
+  name            String
+  registrationNo  String?
+  country         String?
+  state           String?
+  city            String?
+  address         String?
+  phone           String?
+  website         String?
+  kycStatus       KycStatus  @default(PENDING)
+  kycReviewedBy   String?
+  kycReviewedAt   DateTime?
+  kycNotes        String?
+
+  users           User[]
+  kycDocuments    KycDocument[]
+  orders          CertificateOrder[]
+
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@map("organizations")
+}
+
+model KycDocument {
+  id            String       @id @default(uuid())
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String?
+  organization  Organization? @relation(fields: [organizationId], references: [id])
+  documentType  DocumentType
+  fileName      String
+  fileKey       String       // S3 key or encrypted path
+  fileSize      Int
+  mimeType      String
+  status        KycStatus    @default(PENDING)
+  reviewedBy    String?
+  reviewedAt    DateTime?
+  reviewNotes   String?
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([userId])
+  @@index([organizationId])
+  @@map("kyc_documents")
+}
+
+// ─────────────────────────────────────────
+// CERTIFICATE PRODUCTS
+// ─────────────────────────────────────────
+
+model CertificateProduct {
+  id              String          @id @default(uuid())
+  name            String
+  type            CertificateType
+  description     String?
+  maxSans         Int             @default(1)
+  supportsWildcard Boolean        @default(false)
+  isActive        Boolean         @default(true)
+  prices          ProductPrice[]
+  orders          CertificateOrder[]
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@map("certificate_products")
+}
+
+model ProductPrice {
+  id          String         @id @default(uuid())
+  productId   String
+  product     CertificateProduct @relation(fields: [productId], references: [id])
+  validity    ValidityPeriod
+  priceNgn    Decimal        @db.Decimal(12, 2)
+  isActive    Boolean        @default(true)
+
+  createdAt   DateTime       @default(now())
+
+  @@unique([productId, validity])
+  @@map("product_prices")
+}
+
+// ─────────────────────────────────────────
+// CERTIFICATE ORDERS
+// ─────────────────────────────────────────
+
+model CertificateOrder {
+  id                String       @id @default(uuid())
+  orderNumber       String       @unique
+  userId            String
+  user              User         @relation(fields: [userId], references: [id])
+  organizationId    String?
+  organization      Organization? @relation(fields: [organizationId], references: [id])
+  productId         String
+  product           CertificateProduct @relation(fields: [productId], references: [id])
+
+  status            OrderStatus  @default(PENDING_PAYMENT)
+  validity          ValidityPeriod
+  priceNgn          Decimal      @db.Decimal(12, 2)
+
+  // CSR & Certificate Fields
+  csr               String?      @db.Text
+  commonName        String?
+  orgName           String?      @map("org_name")
+  organizationalUnit String?
+  country           String?
+  state             String?
+  locality          String?
+  email             String?
+  sans              String[]     // Subject Alternative Names
+  keyAlgorithm      String?
+  keySize           Int?
+
+  // CA Reference
+  caOrderId         String?
+  caStatus          String?
+
+  // Dates
+  issuedAt          DateTime?
+  expiresAt         DateTime?
+  cancelledAt       DateTime?
+
+  // Relations
+  certificate       Certificate?
+  domainValidations DomainValidation[]
+  transaction       Transaction?
+
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@index([userId])
+  @@index([orderNumber])
+  @@index([status])
+  @@index([expiresAt])
+  @@map("certificate_orders")
+}
+
+// ─────────────────────────────────────────
+// CERTIFICATES
+// ─────────────────────────────────────────
+
+model Certificate {
+  id              String   @id @default(uuid())
+  orderId         String   @unique
+  order           CertificateOrder @relation(fields: [orderId], references: [id])
+
+  serialNumber    String?  @unique
+  thumbprint      String?
+  commonName      String
+  issuerName      String?
+  subjectAltNames String[]
+
+  // Stored file references (encrypted)
+  certFileKey     String?  // S3 key for certificate
+  chainFileKey    String?  // S3 key for chain
+
+  issuedAt        DateTime
+  expiresAt       DateTime
+  revokedAt       DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([serialNumber])
+  @@index([expiresAt])
+  @@map("certificates")
+}
+
+// ─────────────────────────────────────────
+// DOMAIN VALIDATION
+// ─────────────────────────────────────────
+
+model DomainValidation {
+  id              String                 @id @default(uuid())
+  orderId         String
+  order           CertificateOrder       @relation(fields: [orderId], references: [id])
+  domain          String
+  method          DomainValidationMethod
+  status          DomainValidationStatus @default(PENDING)
+
+  // Validation tokens / records
+  token           String?
+  dnsRecord       String?
+  httpFilePath    String?
+  httpFileContent String?
+  validationEmail String?
+
+  validatedAt     DateTime?
+  expiresAt       DateTime?
+  attempts        Int      @default(0)
+  lastCheckedAt   DateTime?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([domain])
+  @@map("domain_validations")
+}
+
+// ─────────────────────────────────────────
+// WALLET & TRANSACTIONS
+// ─────────────────────────────────────────
+
+model Wallet {
+  id           String        @id @default(uuid())
+  userId       String        @unique
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balanceNgn   Decimal       @default(0) @db.Decimal(12, 2)
+  transactions Transaction[]
+
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@map("wallets")
+}
+
+model Transaction {
+  id              String            @id @default(uuid())
+  walletId        String
+  wallet          Wallet            @relation(fields: [walletId], references: [id])
+  orderId         String?           @unique
+  order           CertificateOrder? @relation(fields: [orderId], references: [id])
+
+  type            TransactionType
+  amountNgn       Decimal           @db.Decimal(12, 2)
+  balanceBefore   Decimal           @db.Decimal(12, 2)
+  balanceAfter    Decimal           @db.Decimal(12, 2)
+  description     String?
+  reference       String?           @unique
+
+  // Payment gateway fields
+  paystackRef     String?
+  paystackStatus  String?
+  gatewayResponse String?
+
+  createdAt       DateTime          @default(now())
+
+  @@index([walletId])
+  @@index([reference])
+  @@map("transactions")
+}
+
+// ─────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────
+
+model Notification {
+  id        String             @id @default(uuid())
+  userId    String
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  channel   NotificationChannel
+  title     String
+  message   String             @db.Text
+  metadata  Json?
+  isRead    Boolean            @default(false)
+  readAt    DateTime?
+  sentAt    DateTime?
+
+  createdAt DateTime           @default(now())
+
+  @@index([userId])
+  @@index([isRead])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────
+// AUDIT LOGS
+// ─────────────────────────────────────────
+
+model AuditLog {
+  id          String      @id @default(uuid())
+  userId      String?
+  user        User?       @relation(fields: [userId], references: [id])
+  action      AuditAction
+  resource    String?
+  resourceId  String?
+  metadata    Json?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime    @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
