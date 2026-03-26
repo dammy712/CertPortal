@@ -5,7 +5,8 @@ import { sendSuccess, sendBadRequest } from '../utils/response';
 // Public
 export const listPublic = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const result = await ProductsService.listProducts(false);
+    const caProvider = req.query.provider as string | undefined;
+    const result = await ProductsService.listProducts(false, caProvider);
     return sendSuccess(res, result, 'Products retrieved.');
   } catch (e) { next(e); }
 };

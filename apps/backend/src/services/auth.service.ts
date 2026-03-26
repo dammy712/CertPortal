@@ -77,6 +77,11 @@ export const registerUser = async (data: {
 
   logger.info(`New user registered: ${user.email}`);
 
+  // Fire-and-forget welcome email
+  Email.sendWelcomeEmail(user.email, user.firstName).catch((err) => {
+    logger.warn(`Failed to send welcome email to ${user.email}: ${err.message}`);
+  });
+
   return {
     id: user.id,
     email: user.email,
@@ -84,9 +89,6 @@ export const registerUser = async (data: {
     lastName: user.lastName,
     emailVerifyToken,
   };
-
-  // Fire-and-forget welcome email
-  Email.sendWelcomeEmail(user.email, user.firstName);
 };
 
 // ─── Email Verification ───────────────────────────────

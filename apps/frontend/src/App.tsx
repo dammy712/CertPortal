@@ -33,17 +33,6 @@ import ProductsPage from '@/pages/products/ProductsPage';
 import ConversionPage from '@/pages/conversion/ConversionPage';
 import VerifyPage     from '@/pages/verify/VerifyPage';
 
-// Placeholder
-const ComingSoon = ({ page }: { page: string }) => (
-  <div className="flex items-center justify-center h-full min-h-[400px]">
-    <div className="text-center">
-      <div className="text-4xl mb-4">🔧</div>
-      <h2 className="text-2xl font-semibold text-foreground mb-2">{page}</h2>
-      <p className="text-muted-foreground text-sm">This module will be built in an upcoming session.</p>
-    </div>
-  </div>
-);
-
 export default function App() {
   const { isDark } = useThemeStore();
 
@@ -81,7 +70,6 @@ export default function App() {
           <Route path="/convert" element={<ConversionPage />} />
           <Route path="/verify" element={<VerifyPage />} />
           <Route path="/wallet" element={<WalletPage />} />
-          <Route path="/profile" element={<ComingSoon page="Profile" />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/2fa" element={<TwoFactorSetupPage />} />
         </Route>
