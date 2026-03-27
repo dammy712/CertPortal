@@ -51,8 +51,11 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.3.2",
     "@types/nodemailer": "^6.4.14"
+<<<<<<< HEAD
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
+=======
+>>>>>>> 44a6065 (Initial commit - CertPortal with auth fixes and notifications)
   }
 }

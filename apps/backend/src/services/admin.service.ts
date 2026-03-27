@@ -133,6 +133,34 @@ export const updateUserStatus = async (adminId: string, userId: string, status: 
     data: { userId: adminId, action: 'ADMIN_ACTION', metadata: { action: 'user_status_updated', targetUserId: userId, newStatus: status } },
   });
 
+  const statusMessages: Record<string, { title: string; message: string }> = {
+    ACTIVE: {
+      title: 'Your account has been activated',
+      message: 'Your account has been reactivated by an administrator. You now have full access to the platform.',
+    },
+    SUSPENDED: {
+      title: 'Your account has been suspended',
+      message: 'Your account has been suspended by an administrator. Please contact support if you believe this is a mistake.',
+    },
+    PENDING_VERIFICATION: {
+      title: 'Your account is pending verification',
+      message: 'Your account status has been updated to pending verification. Please complete any required steps to regain full access.',
+    },
+  };
+
+  const notifContent = statusMessages[status];
+  if (notifContent) {
+    await prisma.notification.create({
+      data: {
+        userId,
+        type: 'SYSTEM',
+        channel: 'IN_APP',
+        title: notifContent.title,
+        message: notifContent.message,
+      },
+    });
+  }
+
   logger.info(`Admin ${adminId} updated user ${userId} status to ${status}`);
   return user;
 };
@@ -140,6 +168,11 @@ export const updateUserStatus = async (adminId: string, userId: string, status: 
 export const updateUserRole = async (adminId: string, userId: string, role: string) => {
   const valid = ['CUSTOMER', 'ADMIN', 'SUPER_ADMIN'];
   if (!valid.includes(role)) throw new BadRequestError('Invalid role.');
+
+  const existingUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true },
+  });
 
   const user = await prisma.user.update({
     where: { id: userId },
@@ -151,6 +184,25 @@ export const updateUserRole = async (adminId: string, userId: string, role: stri
     data: { userId: adminId, action: 'ADMIN_ACTION', metadata: { action: 'user_role_updated', targetUserId: userId, newRole: role } },
   });
 
+  const roleLabels: Record<string, string> = {
+    CUSTOMER: 'Customer',
+    ADMIN: 'Admin',
+    SUPER_ADMIN: 'Super Admin',
+  };
+  const oldRoleLabel = roleLabels[existingUser?.role ?? ''] ?? existingUser?.role ?? 'Unknown';
+  const newRoleLabel = roleLabels[role] ?? role;
+
+  await prisma.notification.create({
+    data: {
+      userId,
+      type: 'SYSTEM',
+      channel: 'IN_APP',
+      title: 'Your account role has been updated',
+      message: `Your role has been changed from ${oldRoleLabel} to ${newRoleLabel} by an administrator. If you did not expect this change, please contact support.`,
+    },
+  });
+
+  logger.info(`Admin ${adminId} updated user ${userId} role from ${existingUser?.role} to ${role}`);
   return user;
 };
 

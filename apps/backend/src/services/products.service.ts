@@ -8,17 +8,14 @@ const VALID_VALIDITY = ['ONE_YEAR','TWO_YEARS','THREE_YEARS'];
 
 // ─── List all products (admin sees inactive too) ──────
 
-export const listProducts = async (includeInactive = false, caProvider?: string) => {
-  const where: any = includeInactive ? {} : { isActive: true };
-  if (caProvider) where.caProvider = caProvider;
-
+export const listProducts = async (includeInactive = false) => {
   return prisma.certificateProduct.findMany({
-    where,
+    where: includeInactive ? {} : { isActive: true },
     include: {
-      prices: { where: { isActive: true }, orderBy: { validity: 'asc' } },
+      prices: { orderBy: { validity: 'asc' } },
       _count: { select: { orders: true } },
     },
-    orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+    orderBy: { createdAt: 'asc' },
   });
 };
 
@@ -42,15 +39,10 @@ export const createProduct = async (
   adminId: string,
   data: {
     name: string;
-    slug?: string;
     type: string;
     description?: string;
-    brand?: string;
-    caProvider?: string;
-    caProductCode?: string;
     maxSans?: number;
     supportsWildcard?: boolean;
-    sortOrder?: number;
     prices: Array<{ validity: string; priceNgn: number }>;
   }
 ) => {
@@ -66,15 +58,10 @@ export const createProduct = async (
   const product = await prisma.certificateProduct.create({
     data: {
       name: data.name.trim(),
-      slug: data.slug?.trim() || data.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-'),
       type: data.type as any,
       description: data.description?.trim(),
-      brand: data.brand?.trim(),
-      caProvider: data.caProvider?.trim(),
-      caProductCode: data.caProductCode?.trim(),
       maxSans: data.maxSans ?? 1,
       supportsWildcard: data.supportsWildcard ?? false,
-      sortOrder: data.sortOrder ?? 0,
       isActive: true,
       prices: {
         create: data.prices.map((p) => ({
@@ -107,12 +94,8 @@ export const updateProduct = async (
   data: {
     name?: string;
     description?: string;
-    brand?: string;
-    caProvider?: string;
-    caProductCode?: string;
     maxSans?: number;
     supportsWildcard?: boolean;
-    sortOrder?: number;
     isActive?: boolean;
   }
 ) => {
@@ -124,12 +107,8 @@ export const updateProduct = async (
     data: {
       ...(data.name && { name: data.name.trim() }),
       ...(data.description !== undefined && { description: data.description }),
-      ...(data.brand !== undefined && { brand: data.brand }),
-      ...(data.caProvider !== undefined && { caProvider: data.caProvider }),
-      ...(data.caProductCode !== undefined && { caProductCode: data.caProductCode }),
       ...(data.maxSans !== undefined && { maxSans: data.maxSans }),
       ...(data.supportsWildcard !== undefined && { supportsWildcard: data.supportsWildcard }),
-      ...(data.sortOrder !== undefined && { sortOrder: data.sortOrder }),
       ...(data.isActive !== undefined && { isActive: data.isActive }),
     },
     include: { prices: true },

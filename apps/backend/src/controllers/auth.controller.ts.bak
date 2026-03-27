@@ -31,10 +31,11 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
   try {
     const { email, password, totpCode } = req.body;
     const ipAddress = req.ip;
-    const userAgent = req.headers['user-agent'] as string;
+    const userAgent = req.headers['user-agent'];
 
     const result = await AuthService.loginUser(email, password, totpCode, ipAddress, userAgent);
 
+    // If 2FA required, return early
     if ('requiresTwoFactor' in result) {
       return res.status(200).json({
         success: true,
@@ -43,11 +44,12 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
       });
     }
 
+    // Set refresh token as httpOnly cookie
     res.cookie('refreshToken', result.refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
     return sendSuccess(res, {
@@ -80,11 +82,7 @@ export const logout = async (req: Request, res: Response, next: NextFunction) =>
     const refreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
     await AuthService.logoutUser(req.user!.userId, refreshToken);
 
-    res.clearCookie('refreshToken', {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-    });
+    res.clearCookie('refreshToken');
     return sendSuccess(res, null, 'Logged out successfully.');
   } catch (error) {
     next(error);

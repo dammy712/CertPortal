@@ -4,7 +4,11 @@
     "module": "commonjs",
     "lib": ["ES2020", "dom"],
     "outDir": "./dist",
+<<<<<<< HEAD
     "rootDir": "./src",
+=======
+    "rootDir": "./", 
+>>>>>>> 44a6065 (Initial commit - CertPortal with auth fixes and notifications)
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -16,10 +20,19 @@
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
     "baseUrl": ".",
+<<<<<<< HEAD
+=======
+    /* This matches the specific version in your error message */
+    "ignoreDeprecations": "6.0", 
+>>>>>>> 44a6065 (Initial commit - CertPortal with auth fixes and notifications)
     "paths": {
       "@/*": ["src/*"]
     }
   },
   "include": ["src/**/*", "prisma/**/*"],
   "exclude": ["node_modules", "dist"]
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> 44a6065 (Initial commit - CertPortal with auth fixes and notifications)
