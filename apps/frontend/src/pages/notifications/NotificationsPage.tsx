@@ -345,7 +345,7 @@ export default function NotificationsPage() {
         <EmptyState filter={filter} />
       ) : (
         <div className="space-y-6">
-          {Object.entries(grouped).map(([date, items]) => (
+          {(Object.entries(grouped) as [string, Notification[]][]).map(([date, items]) => (
             <div key={date}>
               <div className="flex items-center gap-3 mb-3">
                 <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">{date}</h3>
