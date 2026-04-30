@@ -3,6 +3,7 @@ import app from './app';
 import { logger } from './utils/logger';
 import { prisma } from './utils/prisma';
 import { startScheduler, stopScheduler } from './utils/scheduler';
+import { startCAHealthCheck, stopCAHealthCheck } from './services/caHealthCheck.service';
 
 const PORT = process.env.PORT || 5000;
 
@@ -20,10 +21,14 @@ async function bootstrap() {
     // Start certificate expiry scheduler
     startScheduler();
 
+    // Start CA health check (runs every hour, hides products if CA is down)
+    startCAHealthCheck();
+
     // Graceful shutdown
     const shutdown = async (signal: string) => {
       logger.info(`${signal} received. Shutting down gracefully...`);
       stopScheduler();
+      stopCAHealthCheck();
       server.close(async () => {
         await prisma.$disconnect();
         logger.info('Server closed.');

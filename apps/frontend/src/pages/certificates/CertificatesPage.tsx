@@ -83,23 +83,30 @@ function DownloadMenu({ cert }: { cert: Certificate }) {
   };
 
   return (
-    <div className="relative">
-      <button onClick={() => setOpen(o => !o)} disabled={loading}
-        className="flex items-center gap-1.5 px-3 py-1.5 border border-border rounded-lg text-xs font-medium hover:bg-accent transition disabled:opacity-50">
+    <div className="relative flex justify-end">
+      <button 
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(o => !o);
+        }} 
+        disabled={loading}
+        className="flex items-center gap-1.5 px-3 py-1.5 border border-border rounded-lg text-xs font-medium hover:bg-accent transition disabled:opacity-50"
+      >
         {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
         Download
       </button>
+      
       {open && (
         <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-8 z-20 bg-card border border-border rounded-xl shadow-lg py-1 w-40">
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-xl shadow-xl py-1 w-40 animate-in fade-in zoom-in-95 duration-100">
             {[
               { type: 'cert' as const,      label: 'Certificate' },
               { type: 'chain' as const,     label: 'Chain Only' },
               { type: 'fullchain' as const, label: 'Full Chain' },
             ].map(({ type, label }) => (
               <button key={type} onClick={() => download(type)}
-                className="w-full text-left px-4 py-2 text-xs hover:bg-accent transition">
+                className="w-full text-left px-4 py-2 text-xs hover:bg-accent transition first:rounded-t-xl last:rounded-b-xl">
                 {label}
               </button>
             ))}
@@ -187,7 +194,6 @@ export default function CertificatesPage() {
         </Link>
       </div>
 
-      {/* Search + filters */}
       <div className="space-y-3">
         <form onSubmit={handleSearch} className="flex gap-2">
           <div className="relative flex-1">
@@ -269,7 +275,6 @@ export default function CertificatesPage() {
         )}
       </div>
 
-      {/* Results */}
       <div className="bg-card border border-border rounded-xl overflow-hidden">
         {loading ? (
           <div className="flex justify-center py-16"><Loader2 className="w-7 h-7 animate-spin text-primary" /></div>
@@ -282,7 +287,8 @@ export default function CertificatesPage() {
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          /* Added pb-24 to ensure dropdowns on last rows have room to show */
+          <div className="overflow-x-auto min-h-[450px] pb-24">
             <table className="w-full text-sm">
               <thead className="bg-muted/50 border-b border-border">
                 <tr>
@@ -311,7 +317,7 @@ export default function CertificatesPage() {
                     <td className="px-4 py-3 whitespace-nowrap">
                       <ExpiryBadge days={cert.daysUntilExpiry} isExpired={cert.isExpired} revokedAt={cert.revokedAt} />
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 text-right">
                       <DownloadMenu cert={cert} />
                     </td>
                   </tr>
@@ -321,13 +327,12 @@ export default function CertificatesPage() {
           </div>
         )}
         {meta && meta.totalPages > 1 && (
-          <div className="px-4 py-3 border-t border-border">
+          <div className="px-4 py-3 border-t border-border bg-card relative z-10">
             <Pagination page={page} pages={meta.totalPages} onPage={p => setPage(p)} />
           </div>
         )}
       </div>
 
-      {/* Legend */}
       {!loading && certs.length > 0 && (
         <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground px-1">
           <div className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-500" /> Active</div>

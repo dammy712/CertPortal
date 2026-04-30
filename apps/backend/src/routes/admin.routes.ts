@@ -60,6 +60,26 @@ router.get('/products', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// CA Health Status
+router.get('/ca-status', async (_req, res, next) => {
+  try {
+    const { getCAStatus } = await import('../services/caHealthCheck.service');
+    const { sendSuccess } = await import('../utils/response');
+    const status = await getCAStatus();
+    return sendSuccess(res, status, 'CA status retrieved.');
+  } catch (e) { next(e); }
+});
+
+// Trigger CA health check manually (super admin)
+router.post('/ca-health-check', requireSuperAdmin, async (_req, res, next) => {
+  try {
+    const { runCAHealthCheck } = await import('../services/caHealthCheck.service');
+    const { sendSuccess } = await import('../utils/response');
+    const result = await runCAHealthCheck();
+    return sendSuccess(res, result, 'CA health check complete.');
+  } catch (e) { next(e); }
+});
+
 // Analytics (Module 17)
 router.get('/analytics/revenue',              AdminController.getRevenueChart);
 router.get('/analytics/products',             AdminController.getProductBreakdown);

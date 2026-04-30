@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
-  ShieldCheck, Plus, Search, Eye, XCircle, Clock,
+  ShieldCheck, Plus, Search, Eye, XCircle, Clock, Trash2,
   CheckCircle2, AlertTriangle, Loader2, RefreshCw,
   FileText, ChevronLeft, ChevronRight, SlidersHorizontal, X, Package
 } from 'lucide-react';
@@ -39,6 +39,7 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; icon: any }>
   EXPIRED:            { label: 'Expired',            color: 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400',       icon: AlertTriangle },
 };
 
+const CANCELLABLE = ['PENDING_PAYMENT', 'PAID', 'PENDING_VALIDATION'];
 const PENDING_STATUSES = ['PAID', 'PENDING_VALIDATION', 'VALIDATING', 'PENDING_ISSUANCE'];
 const STATUSES = ['PENDING_PAYMENT', 'PAID', 'PENDING_VALIDATION', 'VALIDATING', 'PENDING_ISSUANCE', 'ISSUED', 'CANCELLED', 'REFUNDED', 'EXPIRED'];
 const PRODUCT_TYPES = ['DV', 'OV', 'EV', 'WILDCARD', 'MULTI_DOMAIN'];
@@ -53,7 +54,12 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function OrderRow({ o, highlight }: { o: Order; highlight?: boolean }) {
+function OrderRow({ o, highlight, onCancel }: {
+  o: Order;
+  highlight?: boolean;
+  onCancel: (order: Order) => void;
+}) {
+  const canCancel = CANCELLABLE.includes(o.status);
   return (
     <tr className={cn('hover:bg-muted/30 transition', highlight && 'bg-blue-50/50 dark:bg-blue-950/20')}>
       <td className="px-4 py-3 font-mono text-xs text-primary">{o.orderNumber}</td>
@@ -64,16 +70,68 @@ function OrderRow({ o, highlight }: { o: Order; highlight?: boolean }) {
       <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{fmtMoney(o.priceNgn)}</td>
       <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{fmtDate(o.createdAt)}</td>
       <td className="px-4 py-3">
-        <Link to={`/orders/${o.id}`}
-          className="flex items-center gap-1 text-xs text-primary hover:underline whitespace-nowrap">
-          <Eye className="w-3.5 h-3.5" /> View
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link to={`/orders/${o.id}`}
+            className="flex items-center gap-1 text-xs text-primary hover:underline whitespace-nowrap">
+            <Eye className="w-3.5 h-3.5" /> View
+          </Link>
+          {canCancel && (
+            <button
+              onClick={() => onCancel(o)}
+              className="flex items-center gap-1 text-xs text-destructive hover:underline whitespace-nowrap"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Cancel
+            </button>
+          )}
+        </div>
       </td>
     </tr>
   );
 }
 
-const TABLE_HEADERS = ['Order #', 'Domain', 'Product', 'Validity', 'Status', 'Price', 'Date', ''];
+// ── Cancel confirmation dialog ──────────────────────
+
+function CancelDialog({ order, onConfirm, onClose, loading }: {
+  order: Order;
+  onConfirm: () => void;
+  onClose: () => void;
+  loading: boolean;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="bg-card border border-border rounded-2xl p-6 max-w-sm w-full mx-4 shadow-xl">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center">
+            <Trash2 className="w-5 h-5 text-destructive" />
+          </div>
+          <div>
+            <h3 className="font-semibold text-foreground">Cancel Order</h3>
+            <p className="text-xs text-muted-foreground font-mono">{order.orderNumber}</p>
+          </div>
+        </div>
+        <p className="text-sm text-muted-foreground mb-2">
+          Cancel the order for <strong className="text-foreground">{order.commonName || order.product?.name}</strong>?
+        </p>
+        <p className="text-sm text-green-600 dark:text-green-400 font-medium mb-5">
+          {fmtMoney(order.priceNgn)} will be refunded to your wallet.
+        </p>
+        <div className="flex gap-3">
+          <button onClick={onClose} disabled={loading}
+            className="flex-1 px-4 py-2 text-sm border border-border rounded-xl hover:bg-accent transition disabled:opacity-50">
+            Keep Order
+          </button>
+          <button onClick={onConfirm} disabled={loading}
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm bg-destructive text-destructive-foreground rounded-xl hover:bg-destructive/90 transition disabled:opacity-50">
+            {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            Yes, Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const TABLE_HEADERS = ['Order #', 'Domain', 'Product', 'Validity', 'Status', 'Price', 'Date', 'Actions'];
 
 export default function OrdersPage() {
   const [searchParams] = useSearchParams();
@@ -93,6 +151,11 @@ export default function OrdersPage() {
   const [productType, setProductType] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo]     = useState('');
+
+  // ── Cancel dialog ──
+  const [cancelTarget, setCancelTarget] = useState<Order | null>(null);
+  const [cancelling, setCancelling]     = useState(false);
+  const [cancelError, setCancelError]   = useState('');
 
   const activeFilters = [status, productType, dateFrom, dateTo].filter(Boolean).length;
 
@@ -130,8 +193,43 @@ export default function OrdersPage() {
   const handleSearch = (e: FormEvent) => { e.preventDefault(); setPage(1); load(1); };
   const clearFilters = () => { setStatus(''); setProductType(''); setDateFrom(''); setDateTo(''); setPage(1); };
 
+  const handleCancelConfirm = async () => {
+    if (!cancelTarget) return;
+    setCancelling(true);
+    setCancelError('');
+    try {
+      await certificateApi.cancelOrder(cancelTarget.id);
+      setCancelTarget(null);
+      // Refresh both lists
+      setPendingLoading(true);
+      certificateApi.getOrders({ page: 1, limit: 50, status: 'pending' })
+        .then(res => setPendingOrders(res.data || []))
+        .finally(() => setPendingLoading(false));
+      load(page);
+    } catch (err: any) {
+      setCancelError(err?.response?.data?.message || 'Failed to cancel order.');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
+
+      {/* Cancel confirmation dialog */}
+      {cancelTarget && (
+        <CancelDialog
+          order={cancelTarget}
+          onConfirm={handleCancelConfirm}
+          onClose={() => { setCancelTarget(null); setCancelError(''); }}
+          loading={cancelling}
+        />
+      )}
+      {cancelError && (
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 px-4 py-3 rounded-xl shadow-lg text-sm font-medium bg-destructive text-destructive-foreground">
+          <XCircle className="w-4 h-4" /> {cancelError}
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -186,7 +284,7 @@ export default function OrdersPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {pendingOrders.map(o => <OrderRow key={o.id} o={o} highlight />)}
+                {pendingOrders.map(o => <OrderRow key={o.id} o={o} highlight onCancel={setCancelTarget} />)}
               </tbody>
             </table>
           </div>
@@ -300,7 +398,7 @@ export default function OrdersPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {data.data.map((o: Order) => <OrderRow key={o.id} o={o} />)}
+                  {data.data.map((o: Order) => <OrderRow key={o.id} o={o} onCancel={setCancelTarget} />)}
                 </tbody>
               </table>
             </div>

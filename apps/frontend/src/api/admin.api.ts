@@ -29,6 +29,16 @@ export const adminApi = {
   getInvoiceSettings: () => api.get('/settings/invoice').then(r => r.data),
   saveInvoiceSettings: (data: any) => api.put('/settings/invoice', data).then(r => r.data),
 
+  // Pricing / exchange rate settings
+  getPricingSettings: () => api.get('/settings/pricing').then(r => r.data),
+  savePricingSettings: (data: any) => api.put('/settings/pricing', data).then(r => r.data),
+  updateProductPrices: (productId: string, prices: { validity: string; priceNgn: number }[]) =>
+    api.put(`/settings/products/${productId}/prices`, { prices }).then(r => r.data),
+
+  // CA health
+  getCAStatus: () => api.get('/admin/ca-status').then(r => r.data),
+  runCAHealthCheck: () => api.post('/admin/ca-health-check').then(r => r.data),
+
   // Order management (Module 20)
   getOrderDetail:    (id: string) => api.get(`/admin/orders/${id}`).then(r => r.data),
   updateOrderStatus: (id: string, status: string) => api.patch(`/admin/orders/${id}/status`, { status }).then(r => r.data),

@@ -8,11 +8,23 @@ import crypto from 'crypto';
 import { resolveProvider } from './ca';
 import type { CAOrderRequest, CACertificateDownload } from './ca';
 
+// ─── Retry Configuration ─────────────────────────────────
+
+const MAX_CA_ATTEMPTS = 5;
+const RETRY_DELAYS_MS = [
+  30_000,    // retry 1: 30s after first failure
+  120_000,   // retry 2: 2 min
+  600_000,   // retry 3: 10 min
+  1_800_000, // retry 4: 30 min
+  3_600_000, // retry 5: 1 hr (final)
+];
+
 // ─── Submit Order to CA ─────────────────────────────────
 
 /**
  * Submit an order to the appropriate Certificate Authority.
- * Called when an order transitions to PENDING_ISSUANCE (after payment + validation).
+ * Tracks attempt count and sets caRetryAfter on failure so the
+ * scheduler knows when it is safe to try again.
  */
 export const submitToCA = async (orderId: string) => {
   const order = await prisma.certificateOrder.findUnique({
@@ -29,85 +41,122 @@ export const submitToCA = async (orderId: string) => {
     throw new BadRequestError(`Order is not ready for CA submission. Current status: ${order.status}`);
   }
 
+  // Respect retry backoff — don't hammer the CA
+  if (order.caRetryAfter && new Date() < order.caRetryAfter) {
+    const waitSecs = Math.ceil((order.caRetryAfter.getTime() - Date.now()) / 1000);
+    logger.info(`Order ${orderId} in backoff — retry in ${waitSecs}s`);
+    return { status: 'backoff', retryAfter: order.caRetryAfter };
+  }
+
+  const attempt = (order.caAttempts || 0) + 1;
+
   const provider = resolveProvider(order.caProvider || order.product.caProvider);
+  logger.info(`Submitting order ${orderId} to ${provider.name} (attempt ${attempt}/${MAX_CA_ATTEMPTS})`);
 
-  logger.info(`Submitting order ${orderId} to CA provider: ${provider.name}`);
-
-  // Build the CA order request
+  // Build CA request
   const caRequest: CAOrderRequest = {
     productCode: order.product.caProductCode || order.product.type,
-    commonName: order.commonName || '',
-    csr: order.csr || '',
-    sans: order.sans || [],
-    validity: order.validity,
+    commonName:  order.commonName || '',
+    csr:         order.csr || '',
+    sans:        order.sans || [],
+    validity:    order.validity,
     contact: {
       firstName: order.user.firstName,
-      lastName: order.user.lastName,
-      email: order.email || order.user.email,
-      phone: order.user.phone || undefined,
+      lastName:  order.user.lastName,
+      email:     order.email || order.user.email,
+      phone:     order.user.phone || undefined,
     },
-    customer: order.user.email, // Certum requires unique customer ID
+    customer: order.user.email,
   };
 
-  // Add organization info for OV/EV certs
   if (order.organization) {
     caRequest.organization = {
-      name: order.organization.name,
-      country: order.organization.country || 'NG',
-      state: order.organization.state || undefined,
-      city: order.organization.city || undefined,
-      address: order.organization.address || undefined,
-      phone: order.organization.phone || undefined,
+      name:          order.organization.name,
+      country:       order.organization.country || 'NG',
+      state:         order.organization.state   || undefined,
+      city:          order.organization.city    || undefined,
+      address:       order.organization.address || undefined,
+      phone:         order.organization.phone   || undefined,
       registrationNo: order.organization.registrationNo || undefined,
     };
   }
 
-  // Add validation method if we have domain validations
   const domainValidation = await prisma.domainValidation.findFirst({
     where: { orderId },
     orderBy: { createdAt: 'desc' },
   });
   if (domainValidation) {
     caRequest.validationMethod = domainValidation.method as any;
-    caRequest.validationEmail = domainValidation.validationEmail || undefined;
+    caRequest.validationEmail  = domainValidation.validationEmail || undefined;
   }
 
   try {
     const caResponse = await provider.submitOrder(caRequest);
 
-    // Update order with CA reference
+    // Success — clear retry fields, record CA reference
     await prisma.certificateOrder.update({
       where: { id: orderId },
       data: {
-        caProvider: provider.name,
-        caOrderId: caResponse.caOrderId,
-        caStatus: caResponse.status,
-        status: 'PENDING_ISSUANCE',
+        caProvider:   provider.name,
+        caOrderId:    caResponse.caOrderId,
+        caStatus:     caResponse.status,
+        status:       'PENDING_ISSUANCE',
+        caAttempts:   attempt,
+        caLastError:  null,
+        caRetryAfter: null,
       },
     });
 
     await logOrderStatus(orderId, order.status as any, 'PENDING_ISSUANCE', {
-      reason: `Submitted to ${provider.name} CA`,
-      note: `CA Order ID: ${caResponse.caOrderId}`,
+      reason: `Submitted to ${provider.name} CA (attempt ${attempt})`,
+      note:   `CA Order ID: ${caResponse.caOrderId}`,
       changedBy: 'system',
     });
 
     logger.info(`Order ${orderId} submitted to ${provider.name}: CA order ${caResponse.caOrderId}`);
 
     return {
-      caOrderId: caResponse.caOrderId,
-      status: caResponse.status,
+      caOrderId:      caResponse.caOrderId,
+      status:         caResponse.status,
       approverEmails: caResponse.approverEmails,
-      validationDetails: caResponse.validationDetails,
     };
-  } catch (err: any) {
-    logger.error(`CA submission failed for order ${orderId}: ${err.message}`);
 
-    // Log the failure but don't change order status — allow retry
+  } catch (err: any) {
+    logger.error(`CA submission attempt ${attempt} failed for order ${orderId}: ${err.message}`);
+
+    const retryDelayMs = RETRY_DELAYS_MS[attempt - 1] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1];
+    const retryAfter   = attempt < MAX_CA_ATTEMPTS
+      ? new Date(Date.now() + retryDelayMs)
+      : null; // null = give up, needs admin intervention
+
+    await prisma.certificateOrder.update({
+      where: { id: orderId },
+      data: {
+        caAttempts:   attempt,
+        caLastError:  err.message.substring(0, 500),
+        caRetryAfter: retryAfter,
+      },
+    });
+
     await logOrderStatus(orderId, order.status as any, order.status as any, {
-      reason: `CA submission failed: ${err.message}`,
+      reason: `CA submission failed (attempt ${attempt}): ${err.message}`,
       changedBy: 'system',
     });
+
+    if (attempt >= MAX_CA_ATTEMPTS) {
+      logger.error(`Order ${orderId} exhausted all ${MAX_CA_ATTEMPTS} CA attempts — needs admin review`);
+      // Notify admin via in-app notification
+      await prisma.notification.create({
+        data: {
+          userId:  order.userId,
+          type:    'ORDER_UPDATE',
+          channel: 'IN_APP',
+          title:   '⚠️ Certificate Issuance Failed',
+          message: `Order ${order.orderNumber} could not be submitted to the CA after ${MAX_CA_ATTEMPTS} attempts. Please contact support.`,
+          metadata: { orderId, orderNumber: order.orderNumber, error: err.message },
+        },
+      }).catch(() => {}); // never throw from cleanup
+    }
 
     throw new BadRequestError(`Certificate Authority error: ${err.message}`);
   }

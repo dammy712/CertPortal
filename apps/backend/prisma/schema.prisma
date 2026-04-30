@@ -342,6 +342,11 @@ model CertificateOrder {
   caOrderId         String?
   caStatus          String?
 
+  // CA Retry tracking
+  caAttempts        Int          @default(0)   // number of submission attempts
+  caLastError       String?                    // last error message from CA
+  caRetryAfter      DateTime?                  // don't retry before this time
+
   // Dates
   issuedAt          DateTime?
   expiresAt         DateTime?

@@ -3,18 +3,17 @@
  *
  * SOAP-based API integration with Certum CA.
  * Docs: https://repository.certum.pl/API/API%20-%20User%20Guide%20EN%205.17.pdf
- * WSDL: https://gs.certum.pl/service/PartnerApi.wsdl (production)
- *       https://gs.test.certum.pl/service/PartnerApi.wsdl (test)
  *
- * Product codes (from Certum docs v5.17):
- *   Commercial SSL (DV):           601 (issue), 606 (renew)
- *   Commercial Wildcard SSL:       741 (issue), 746 (renew)
- *   Commercial MultiDomain SSL:    931 (issue), 936 (renew)
- *   Trusted SSL (OV):              631 (issue), 636 (renew)
- *   Trusted Wildcard SSL:          681 (issue), 686 (renew)
- *   Trusted MultiDomain SSL:       921 (issue), 926 (renew)
- *   Premium EV SSL:                641 (issue), 646 (renew)
- *   Premium EV MultiDomain SSL:    981 (issue), 986 (renew)
+ * WSDL (also the service endpoint — POST directly to it):
+ *   Test:       https://gs.test.certum.pl/service/PartnerApi.wsdl
+ *   Production: https://gs.certum.pl/service/PartnerApi.wsdl
+ *
+ * Key facts derived from the live WSDL schema:
+ *   - Namespace:  http://webservice.api.muc.unizeto.pl/  (NOT cps.certum.pl)
+ *   - Auth:       inside body as <requestHeader><authToken>, password BEFORE userName
+ *   - Style:      document-literal — operation element IS the body, no double-wrapping
+ *   - Statuses:   AWAITING | VERIFICATION | ACCEPTED | ENROLLED | REJECTED
+ *   - Revoke:     requires serialNumber (HEX), NOT orderID
  */
 
 import { logger } from '../../utils/logger';
@@ -23,84 +22,86 @@ import type {
   CACertificateDownload, CAValidationStatus,
 } from './index';
 
-// ─── SOAP Helpers ───────────────────────────────────────
+// ─── Config ──────────────────────────────────────────────
 
-const CERTUM_WSDL = process.env.CERTUM_API_URL || 'https://gs.certum.pl/service/PartnerApi.wsdl';
+// The WSDL URL IS the service endpoint — do NOT strip .wsdl
+const CERTUM_ENDPOINT = process.env.CERTUM_API_URL || 'https://gs.test.certum.pl/service/PartnerApi.wsdl';
 const CERTUM_USERNAME = process.env.CERTUM_API_KEY || '';
 const CERTUM_PASSWORD = process.env.CERTUM_API_SECRET || '';
-const CERTUM_PARTNER = process.env.CERTUM_PARTNER_ID || '';
+
+// ─── SOAP Helpers ────────────────────────────────────────
 
 /**
- * Build a SOAP XML envelope for Certum Partner API.
- * Certum uses WS-Security headers for auth.
+ * Auth block per WSDL schema (tns:authToken type):
+ * <password> must come BEFORE <userName> per schema element order.
  */
-const buildSoapEnvelope = (body: string): string => {
-  return `<?xml version="1.0" encoding="UTF-8"?>
+const authBlock = (): string => `
+    <requestHeader>
+      <authToken>
+        <password>${CERTUM_PASSWORD}</password>
+        <userName>${CERTUM_USERNAME}</userName>
+      </authToken>
+    </requestHeader>`;
+
+/**
+ * Build a SOAP envelope using the correct WSDL namespace.
+ * Document-literal: the operation element wraps auth + content directly.
+ */
+const buildEnvelope = (operationName: string, innerContent: string): string =>
+  `<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope
   xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-  xmlns:ser="http://service.api.cps.certum.pl/">
-  <soapenv:Header>
-    <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
-      <wsse:UsernameToken>
-        <wsse:Username>${CERTUM_USERNAME}</wsse:Username>
-        <wsse:Password>${CERTUM_PASSWORD}</wsse:Password>
-      </wsse:UsernameToken>
-    </wsse:Security>
-  </soapenv:Header>
+  xmlns:tns="http://webservice.api.muc.unizeto.pl/">
   <soapenv:Body>
-    ${body}
+    <tns:${operationName}>
+      ${authBlock()}
+      ${innerContent}
+    </tns:${operationName}>
   </soapenv:Body>
 </soapenv:Envelope>`;
-};
 
 /**
- * Send a SOAP request to Certum and parse the XML response.
+ * Send a SOAP request to Certum and return the raw XML response.
  */
-const soapRequest = async (endpoint: string, body: string): Promise<string> => {
-  const envelope = buildSoapEnvelope(body);
+const soapRequest = async (operationName: string, innerContent: string): Promise<string> => {
+  logger.debug(`Certum SOAP: ${operationName}`);
 
-  logger.debug(`Certum SOAP request to ${endpoint}`);
-
-  const response = await fetch(endpoint, {
+  const response = await fetch(CERTUM_ENDPOINT, {
     method: 'POST',
     headers: {
       'Content-Type': 'text/xml; charset=utf-8',
-      'SOAPAction': '',
+      'SOAPAction': `"http://webservice.api.muc.unizeto.pl/${operationName}"`,
     },
-    body: envelope,
+    body: buildEnvelope(operationName, innerContent),
   });
 
-  const responseText = await response.text();
+  const text = await response.text();
 
-  if (!response.ok) {
-    logger.error(`Certum SOAP error ${response.status}: ${responseText.substring(0, 500)}`);
-    throw new Error(`Certum API error: ${response.status}`);
+  // 500 = SOAP fault — still parseable
+  if (!response.ok && response.status !== 500) {
+    logger.error(`Certum HTTP ${response.status}: ${text.substring(0, 300)}`);
+    throw new Error(`Certum API HTTP error: ${response.status}`);
   }
 
-  return responseText;
+  return text;
 };
 
-/**
- * Simple XML value extractor (avoids heavy XML parser dependency).
- * Works for flat SOAP responses from Certum.
- */
+// ─── XML Helpers ─────────────────────────────────────────
+
 const extractXmlValue = (xml: string, tag: string): string | null => {
-  const regex = new RegExp(`<(?:[a-z0-9]+:)?${tag}[^>]*>([^<]*)<`, 'i');
-  const match = xml.match(regex);
+  const match = xml.match(new RegExp(`<(?:[a-z0-9]+:)?${tag}[^>]*>([^<]*)<`, 'i'));
   return match ? match[1].trim() : null;
 };
 
 const extractXmlValues = (xml: string, tag: string): string[] => {
-  const regex = new RegExp(`<(?:[a-z0-9]+:)?${tag}[^>]*>([^<]*)<`, 'gi');
-  const results: string[] = [];
-  let match;
-  while ((match = regex.exec(xml)) !== null) {
-    results.push(match[1].trim());
-  }
-  return results;
+  const re = new RegExp(`<(?:[a-z0-9]+:)?${tag}[^>]*>([^<]*)<`, 'gi');
+  const out: string[] = [];
+  let m;
+  while ((m = re.exec(xml)) !== null) out.push(m[1].trim());
+  return out;
 };
 
-// ─── Certum Product Code Mapping ────────────────────────
+// ─── Product Code Map ─────────────────────────────────────
 
 const CERTUM_PRODUCT_MAP: Record<string, { issue: number; renew: number }> = {
   'CERTUM_DV':    { issue: 601, renew: 606 },
@@ -113,247 +114,235 @@ const CERTUM_PRODUCT_MAP: Record<string, { issue: number; renew: number }> = {
   'CERTUM_EV_MD': { issue: 981, renew: 986 },
 };
 
-// Certum domain verification method mapping
+// DCV methods per docs section 4.2.3
 const CERTUM_DCV_MAP: Record<string, string> = {
-  'EMAIL':      'EMAIL',
-  'DNS_TXT':    'DNS',
-  'DNS_CNAME':  'DNS',
-  'HTTP_FILE':  'HTTPS',
+  'ADMIN':     'ADMIN',
+  'EMAIL':     'ADMIN',
+  'DNS_TXT':   'DNS_TXT',
+  'DNS_CNAME': 'DNS_CNAME',
+  'HTTP_FILE': 'FILE',
+  'FILE':      'FILE',
 };
 
-// ─── Normalize Certum status → our internal status ──────
+// ─── Status Normalisation ─────────────────────────────────
 
-const normalizeStatus = (certumStatus: string): string => {
-  const s = certumStatus?.toUpperCase() || '';
-  if (['ISSUED', 'ACTIVE'].includes(s)) return 'issued';
-  if (['CANCELLED', 'REJECTED', 'REVOKED'].includes(s)) return 'cancelled';
-  if (['NEW', 'PENDING', 'WAITING_FOR_VERIFICATION'].includes(s)) return 'pending';
-  if (['VERIFYING', 'PROCESSING', 'VERIFIED'].includes(s)) return 'processing';
-  return 'pending';
+const normalizeStatus = (s: string): string => {
+  switch ((s || '').toUpperCase()) {
+    case 'ENROLLED':     return 'issued';
+    case 'REJECTED':     return 'cancelled';
+    case 'AWAITING':     return 'pending';
+    case 'VERIFICATION':
+    case 'ACCEPTED':     return 'processing';
+    default:             return 'pending';
+  }
 };
 
-// ─── Provider Implementation ────────────────────────────
+// ─── Provider ────────────────────────────────────────────
 
 export class CertumProvider implements CAProvider {
   name = 'certum';
 
-  private getEndpoint(): string {
-    // Strip .wsdl to get the service endpoint
-    return CERTUM_WSDL.replace(/\.wsdl$/, '');
-  }
-
   async submitOrder(request: CAOrderRequest): Promise<CAOrderResponse> {
     const productCodes = CERTUM_PRODUCT_MAP[request.productCode];
-    if (!productCodes) {
-      throw new Error(`Unknown Certum product code: ${request.productCode}`);
-    }
+    if (!productCodes) throw new Error(`Unknown Certum product code: ${request.productCode}`);
 
-    // Build SAN entries for multi-domain certs
-    const sanEntries = (request.sans || [])
-      .map((san, i) => `
-        <SANEntry>
-          <DNSName>${san}</DNSName>
-        </SANEntry>`)
+    // customer cannot equal partner login (docs 4.2.1)
+    const customer = (request.customer || request.contact?.email || 'portal-customer')
+      .replace(/\s+/g, '-').substring(0, 64);
+    const safeCustomer = customer === CERTUM_USERNAME ? `${customer}-order` : customer;
+
+    // SANEntries must include commonName (docs 4.2.2)
+    const allSans = [...new Set([request.commonName, ...(request.sans || [])])];
+    const sanEntries = allSans
+      .map(san => `<SANEntry><DNSName>${san}</DNSName></SANEntry>`)
       .join('');
 
-    // Build organization fields for OV/EV
+    const dcvMethod = CERTUM_DCV_MAP[request.validationMethod || 'ADMIN'] || 'ADMIN';
+
     const orgFields = request.organization ? `
-      <O>${request.organization.name}</O>
-      <L>${request.organization.city || ''}</L>
-      <SP>${request.organization.state || ''}</SP>
-      <C>${request.organization.country || 'NG'}</C>
-      ${request.organization.registrationNo ? `<SN>${request.organization.registrationNo}</SN>` : ''}
-    ` : '';
+        <organization>${request.organization.name}</organization>
+        <locality>${request.organization.city || ''}</locality>
+        <state>${request.organization.state || ''}</state>
+        <country>${request.organization.country || 'NG'}</country>` : '';
 
-    const dcvMethod = CERTUM_DCV_MAP[request.validationMethod || 'EMAIL'] || 'EMAIL';
+    const requestorInfo = request.contact ? `
+      <requestorInfo>
+        <email>${request.contact.email}</email>
+        <firstName>${(request.contact.firstName || '').substring(0, 16)}</firstName>
+        <lastName>${(request.contact.lastName || '').substring(0, 40)}</lastName>
+        ${request.contact.phone ? `<phone>${request.contact.phone}</phone>` : ''}
+      </requestorInfo>` : '';
 
-    const body = `
-    <ser:quickOrder>
-      <quickOrderRequest>
+    const orgInfo = request.organization?.registrationNo ? `
+      <organizationInfo>
+        <taxIdentificationNumber>${request.organization.registrationNo}</taxIdentificationNumber>
+      </organizationInfo>` : '';
+
+    const xml = await soapRequest('quickOrder', `
+      <orderParameters>
+        <customer>${safeCustomer}</customer>
         <productCode>${productCodes.issue}</productCode>
-        <customer>${request.customer || request.contact?.email || 'portal-customer'}</customer>
         <CSR>${request.csr}</CSR>
-        <CN>${request.commonName}</CN>
+        <commonName>${request.commonName}</commonName>
+        <email>${request.contact?.email || ''}</email>
         ${orgFields}
-        <E>${request.contact?.email || ''}</E>
-        ${request.contact ? `
-          <GN>${request.contact.firstName || ''}</GN>
-          <surname>${request.contact.lastName || ''}</surname>
-        ` : ''}
-        <verificationMethod>${dcvMethod}</verificationMethod>
-        ${request.validationEmail ? `<approverEmail>${request.validationEmail}</approverEmail>` : ''}
-        ${sanEntries ? `<SANEntries>${sanEntries}</SANEntries>` : ''}
-      </quickOrderRequest>
-    </ser:quickOrder>`;
+      </orderParameters>
+      <SANEntries>${sanEntries}</SANEntries>
+      <SANApprover>
+        <approverMethod>${dcvMethod}</approverMethod>
+        ${dcvMethod === 'ADMIN'
+          ? '<approverEmailPrefix>ADMIN</approverEmailPrefix>'
+          : request.validationEmail
+            ? `<approverEmail>${request.validationEmail}</approverEmail>`
+            : ''}
+      </SANApprover>
+      ${requestorInfo}
+      ${orgInfo}`);
 
-    const xml = await soapRequest(this.getEndpoint(), body);
+    const successCode = extractXmlValue(xml, 'successCode');
+    const errorCode   = extractXmlValue(xml, 'errorCode');
+    const caOrderId   = extractXmlValue(xml, 'orderID');
 
-    const caOrderId = extractXmlValue(xml, 'orderID') || extractXmlValue(xml, 'orderId');
-    const status = extractXmlValue(xml, 'orderStatus') || 'NEW';
-    const errorCode = extractXmlValue(xml, 'errorCode');
-
-    if (errorCode && errorCode !== '0') {
-      const errorMessage = extractXmlValue(xml, 'errorMessage') || 'Unknown Certum error';
-      logger.error(`Certum order failed: ${errorCode} - ${errorMessage}`);
-      throw new Error(`Certum order error: ${errorMessage} (code: ${errorCode})`);
+    if (successCode !== '0' || (errorCode && errorCode !== '0')) {
+      const errMsg = `Certum quickOrder failed: successCode=${successCode}, errorCode=${errorCode}`;
+      logger.error(`${errMsg}\nResponse: ${xml.substring(0, 800)}`);
+      throw new Error(errMsg);
     }
 
-    if (!caOrderId) {
-      logger.error('Certum order response missing orderID');
-      throw new Error('Certum API did not return an order ID');
-    }
+    if (!caOrderId) throw new Error('Certum API did not return an order ID');
 
-    logger.info(`Certum order placed: ${caOrderId} (status: ${status})`);
-
-    return {
-      caOrderId,
-      status: normalizeStatus(status),
-    };
+    logger.info(`Certum order placed: ${caOrderId}`);
+    return { caOrderId, status: 'pending' };
   }
 
   async getOrderStatus(caOrderId: string): Promise<CAOrderStatus> {
-    const body = `
-    <ser:getOrderByOrderID>
-      <getOrderByOrderIDRequest>
-        <orderID>${caOrderId}</orderID>
-      </getOrderByOrderIDRequest>
-    </ser:getOrderByOrderID>`;
+    const stateXml = await soapRequest('getOrderState', `<orderID>${caOrderId}</orderID>`);
 
-    const xml = await soapRequest(this.getEndpoint(), body);
-
-    const status = extractXmlValue(xml, 'orderStatus') || 'UNKNOWN';
-    const serialNumber = extractXmlValue(xml, 'serialNumber');
+    const orderStatus = extractXmlValue(stateXml, 'orderStatus') || 'AWAITING';
+    if (extractXmlValue(stateXml, 'successCode') !== '0') {
+      throw new Error(`Certum getOrderState failed for ${caOrderId}`);
+    }
 
     const result: CAOrderStatus = {
       caOrderId,
-      status: normalizeStatus(status),
-      caRawStatus: status,
+      status: normalizeStatus(orderStatus),
+      caRawStatus: orderStatus,
     };
 
-    // If issued, try to get certificate data inline
-    if (normalizeStatus(status) === 'issued' && serialNumber) {
-      result.serialNumber = serialNumber;
-      result.certificatePem = extractXmlValue(xml, 'X509Cert') || undefined;
+    if (orderStatus === 'ENROLLED') {
+      const detailXml = await soapRequest('getOrderByOrderID', `
+        <orderID>${caOrderId}</orderID>
+        <orderOption>
+          <orderStatus>true</orderStatus>
+          <certificateDetails>true</certificateDetails>
+        </orderOption>`);
+
+      result.serialNumber   = extractXmlValue(detailXml, 'serialNumber') || undefined;
+      result.certificatePem = extractXmlValue(detailXml, 'X509Cert') || undefined;
+
+      const startDate = extractXmlValue(detailXml, 'startDate');
+      const endDate   = extractXmlValue(detailXml, 'endDate');
+      if (startDate) result.issuedAt  = new Date(startDate);
+      if (endDate)   result.expiresAt = new Date(endDate);
     }
 
     return result;
   }
 
   async downloadCertificate(caOrderId: string): Promise<CACertificateDownload> {
-    const body = `
-    <ser:getCertificate>
-      <getCertificateRequest>
-        <orderID>${caOrderId}</orderID>
-      </getCertificateRequest>
-    </ser:getCertificate>`;
+    const xml = await soapRequest('getCertificate', `<orderID>${caOrderId}</orderID>`);
 
-    const xml = await soapRequest(this.getEndpoint(), body);
-
-    const certPem = extractXmlValue(xml, 'X509Cert');
-    const chainPem = extractXmlValue(xml, 'X509CACert') || extractXmlValue(xml, 'chainCert');
-    const serialNumber = extractXmlValue(xml, 'serialNumber');
-    const notBefore = extractXmlValue(xml, 'notBefore');
-    const notAfter = extractXmlValue(xml, 'notAfter');
-
-    if (!certPem) {
+    if (extractXmlValue(xml, 'successCode') !== '0') {
       throw new Error('Certificate not yet available from Certum');
     }
 
+    const certPem   = extractXmlValue(xml, 'X509Cert');
+    const startDate = extractXmlValue(xml, 'startDate');
+    const endDate   = extractXmlValue(xml, 'endDate');
+
+    const caBundleMatch = xml.match(/<caBundle>([\s\S]*?)<\/caBundle>/i);
+    const chainPem = caBundleMatch
+      ? extractXmlValues(caBundleMatch[1], 'X509Cert').join('\n')
+      : '';
+
+    if (!certPem) throw new Error('Certificate not yet available from Certum');
+
     return {
       certificatePem: certPem,
-      chainPem: chainPem || '',
-      serialNumber: serialNumber || '',
-      issuedAt: notBefore ? new Date(notBefore) : new Date(),
-      expiresAt: notAfter ? new Date(notAfter) : new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+      chainPem,
+      serialNumber: extractXmlValue(xml, 'serialNumber') || '',
+      issuedAt:  startDate ? new Date(startDate) : new Date(),
+      expiresAt: endDate   ? new Date(endDate)   : new Date(Date.now() + 199 * 24 * 60 * 60 * 1000),
     };
   }
 
   async getValidationStatus(caOrderId: string): Promise<CAValidationStatus[]> {
-    const body = `
-    <ser:getSanVerificationState>
-      <getSanVerificationStateRequest>
-        <orderID>${caOrderId}</orderID>
-      </getSanVerificationStateRequest>
-    </ser:getSanVerificationState>`;
+    const xml = await soapRequest('getSanVerificationState', `<orderID>${caOrderId}</orderID>`);
+    const domains = extractXmlValues(xml, 'FQDN');
+    const states  = extractXmlValues(xml, 'state');
 
-    const xml = await soapRequest(this.getEndpoint(), body);
-
-    // Extract domain verification entries
-    const domains = extractXmlValues(xml, 'DNSName');
-    const statuses = extractXmlValues(xml, 'verificationStatus');
-    const methods = extractXmlValues(xml, 'verificationMethod');
-
-    return domains.map((domain, i) => ({
-      domain,
-      method: methods[i] || 'EMAIL',
-      status: (statuses[i] || 'PENDING').toLowerCase().includes('verified') ? 'validated' : 'pending',
-    }));
+    return domains.map((domain, i) => {
+      const state = (states[i] || 'REQUIRED').toUpperCase();
+      return {
+        domain,
+        method: 'DNS_TXT',
+        status: state === 'VERIFIED' ? 'validated' : state === 'FAILED' ? 'failed' : 'pending',
+      };
+    });
   }
 
-  async triggerValidation(caOrderId: string, domain: string, method: string): Promise<void> {
-    const dcvMethod = CERTUM_DCV_MAP[method] || 'EMAIL';
-
-    const body = `
-    <ser:performSanVerification>
-      <performSanVerificationRequest>
-        <orderID>${caOrderId}</orderID>
-        <DNSName>${domain}</DNSName>
-        <verificationMethod>${dcvMethod}</verificationMethod>
-      </performSanVerificationRequest>
-    </ser:performSanVerification>`;
-
-    await soapRequest(this.getEndpoint(), body);
-    logger.info(`Certum validation triggered for ${domain} on order ${caOrderId}`);
+  async triggerValidation(caOrderId: string, _domain: string, method: string): Promise<void> {
+    const dcvMethod = CERTUM_DCV_MAP[method] || 'ADMIN';
+    await soapRequest('addSanVerification', `
+      <orderID>${caOrderId}</orderID>
+      <SANApprover>
+        <approverMethod>${dcvMethod}</approverMethod>
+        ${dcvMethod === 'ADMIN' ? '<approverEmailPrefix>ADMIN</approverEmailPrefix>' : ''}
+      </SANApprover>`);
+    logger.info(`Certum validation re-triggered for order ${caOrderId}`);
   }
 
   async cancelOrder(caOrderId: string): Promise<void> {
-    const body = `
-    <ser:cancelOrder>
-      <cancelOrderRequest>
+    await soapRequest('cancelOrder', `
+      <cancelParameters>
         <orderID>${caOrderId}</orderID>
-      </cancelOrderRequest>
-    </ser:cancelOrder>`;
-
-    await soapRequest(this.getEndpoint(), body);
+        <note>Cancelled via CertPortal</note>
+      </cancelParameters>`);
     logger.info(`Certum order cancelled: ${caOrderId}`);
   }
 
   async revokeCertificate(caOrderId: string, reason?: string): Promise<void> {
-    const body = `
-    <ser:revokeCertificate>
-      <revokeCertificateRequest>
-        <orderID>${caOrderId}</orderID>
-        <revocationReason>${reason || 'unspecified'}</revocationReason>
-      </revokeCertificateRequest>
-    </ser:revokeCertificate>`;
+    // Requires serialNumber in HEX — fetch it first (docs 6.34)
+    const statusXml = await soapRequest('getOrderByOrderID', `
+      <orderID>${caOrderId}</orderID>
+      <orderOption><orderStatus>true</orderStatus></orderOption>`);
 
-    await soapRequest(this.getEndpoint(), body);
-    logger.info(`Certum certificate revoked for order: ${caOrderId}`);
+    const serialNumber = extractXmlValue(statusXml, 'serialNumber');
+    if (!serialNumber) throw new Error('Cannot revoke: no serial number found for this order');
+
+    const validReasons = ['KEYCOMPROMISE', 'AFFILIATIONCHANGED', 'CESSATIONOFOPERATION', 'UNSPECIFIED', 'SUPERSEDED'];
+    const certumReason = validReasons.includes((reason || '').toUpperCase())
+      ? reason!.toUpperCase() : 'UNSPECIFIED';
+
+    await soapRequest('revokeCertificate', `
+      <revokeCertificateParameters>
+        <serialNumber>${serialNumber}</serialNumber>
+        <revocationReason>${certumReason}</revocationReason>
+        <note>Revoked via CertPortal</note>
+      </revokeCertificateParameters>`);
+
+    logger.info(`Certum certificate revoked: serial ${serialNumber}`);
   }
 
   async listProducts(): Promise<Array<{ code: string; name: string; type: string }>> {
-    const body = `
-    <ser:getProductList>
-      <getProductListRequest/>
-    </ser:getProductList>`;
-
     try {
-      const xml = await soapRequest(this.getEndpoint(), body);
-      const codes = extractXmlValues(xml, 'productCode');
-      const names = extractXmlValues(xml, 'productName');
-
-      return codes.map((code, i) => ({
-        code,
-        name: names[i] || code,
-        type: 'ssl',
-      }));
+      const xml   = await soapRequest('getProductList', '<hashAlgorithm>false</hashAlgorithm>');
+      const codes = extractXmlValues(xml, 'code');
+      return codes.map(code => ({ code, name: `Certum Product ${code}`, type: 'ssl' }));
     } catch (err) {
-      logger.warn('Failed to list Certum products:', err);
-      // Return static list as fallback
+      logger.warn('Failed to list Certum products — returning static map:', err);
       return Object.entries(CERTUM_PRODUCT_MAP).map(([key, val]) => ({
-        code: String(val.issue),
-        name: key,
-        type: 'ssl',
+        code: String(val.issue), name: key, type: 'ssl',
       }));
     }
   }

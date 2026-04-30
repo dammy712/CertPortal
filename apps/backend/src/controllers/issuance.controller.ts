@@ -33,12 +33,33 @@ export const downloadCertificate = async (req: Request, res: Response, next: Nex
     if (!['cert', 'chain', 'fullchain'].includes(fileType)) {
       return sendBadRequest(res, 'type must be cert, chain, or fullchain.');
     }
+
     const result = await IssuanceService.downloadCertificate(
       req.params.id,
       req.user!.userId,
       fileType as any
     );
-    return sendSuccess(res, result, 'Download URL generated.');
+
+    // Stream the file directly — avoids localhost URL issues and auth problems
+    const fs = await import('fs');
+    const path = await import('path');
+
+    // result.url is like "/uploads/certs/abc123.crt" or "http://localhost:5000/uploads/..."
+    // Extract just the file key portion and resolve to disk path
+    const urlPath = result.url.replace(/^https?:\/\/[^/]+/, ''); // strip host if present
+    const filePath = path.join(process.cwd(), urlPath.startsWith('/') ? urlPath.slice(1) : urlPath);
+
+    if (!fs.existsSync(filePath)) {
+      return sendBadRequest(res, 'Certificate file not found on server.');
+    }
+
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+    const fileName    = result.fileName || `certificate-${fileType}.crt`;
+
+    res.setHeader('Content-Type', 'application/x-pem-file');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(fileContent);
+
   } catch (error) { next(error); }
 };
 
@@ -49,10 +70,46 @@ export const adminIssueCertificate = async (req: Request, res: Response, next: N
   } catch (error) { next(error); }
 };
 
-// Auto-issue when order reaches PENDING_ISSUANCE (called internally or via webhook)
-export const triggerIssuance = async (req: Request, res: Response, next: NextFunction) => {
+// Customer-triggered immediate CA status poll
+export const checkCAStatus = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const result = await IssuanceService.issueCertificate(req.params.orderId);
-    return sendCreated(res, result, 'Certificate issued.');
-  } catch (error) { next(error); }
+    const { orderId } = req.params;
+
+    // Verify order belongs to this user
+    const { prisma } = await import('../utils/prisma');
+    const order = await prisma.certificateOrder.findFirst({
+      where: { id: orderId, userId: req.user!.userId },
+      select: { id: true, status: true, caOrderId: true },
+    });
+
+    if (!order) return next(new (await import('../utils/errors')).NotFoundError('Order not found.'));
+
+    if (order.status === 'ISSUED') {
+      const cert = await IssuanceService.getCertificate(orderId, req.user!.userId);
+      return sendSuccess(res, { status: 'issued', certificate: cert }, 'Certificate is ready.');
+    }
+
+    if (!order.caOrderId) {
+      // Not yet submitted — try submitting now
+      const result = await IssuanceService.issueCertificate(orderId);
+      return sendSuccess(res, { status: 'submitted', ...result }, 'Submitted to CA.');
+    }
+
+    // Already submitted — poll for latest status
+    const caStatus = await IssuanceService.pollCAStatus(orderId);
+
+    if (caStatus.status === 'issued') {
+      const cert = await IssuanceService.getCertificate(orderId, req.user!.userId);
+      return sendSuccess(res, { status: 'issued', certificate: cert }, 'Certificate is ready!');
+    }
+
+    return sendSuccess(res, {
+      status: caStatus.status,
+      caRawStatus: caStatus.caRawStatus,
+      message: caStatus.status === 'processing'
+        ? 'Certum is verifying your domain. Please check your domain admin email and click the verification link.'
+        : 'Still processing. Check again in a few minutes.',
+    }, 'Status checked.');
+
+  } catch (e) { next(e); }
 };
