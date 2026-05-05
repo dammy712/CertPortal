@@ -331,13 +331,33 @@ export const getOrderById = async (orderId: string, userId: string) => {
 export const cancelOrder = async (orderId: string, userId: string) => {
   const order = await prisma.certificateOrder.findFirst({
     where: { id: orderId, userId },
+    include: { product: { select: { caProvider: true } } },
   });
   if (!order) throw new NotFoundError('Order not found.');
-  if (!['PENDING_PAYMENT', 'PAID', 'PENDING_VALIDATION'].includes(order.status)) {
-    throw new BadRequestError('This order cannot be cancelled at its current stage.');
+
+  const cancellable = ['PENDING_PAYMENT', 'PAID', 'PENDING_VALIDATION', 'PENDING_ISSUANCE'];
+  if (!cancellable.includes(order.status)) {
+    throw new BadRequestError(
+      order.status === 'ISSUED'
+        ? 'Certificate already issued. Revoke the certificate instead of cancelling.'
+        : 'This order cannot be cancelled at its current stage.'
+    );
   }
 
-  // Refund wallet if already paid
+  // If already submitted to Certum, cancel on their side first
+  if (order.caOrderId && order.status === 'PENDING_ISSUANCE') {
+    try {
+      const { resolveProvider } = await import('./ca');
+      const provider = resolveProvider(order.caProvider || order.product?.caProvider);
+      await provider.cancelOrder(order.caOrderId);
+      logger.info(`Certum order ${order.caOrderId} cancelled successfully`);
+    } catch (err: any) {
+      // Log but don't block the local cancel — Certum may have already rejected it
+      logger.warn(`Could not cancel order on Certum (${order.caOrderId}): ${err.message}`);
+    }
+  }
+
+  // Refund wallet if payment was taken (any status except PENDING_PAYMENT)
   if (order.status !== 'PENDING_PAYMENT') {
     const wallet = await prisma.wallet.findUnique({ where: { userId } });
     if (wallet) {
@@ -371,15 +391,22 @@ export const cancelOrder = async (orderId: string, userId: string) => {
     });
   }
 
-  // Log CANCELLED status
   await logOrderStatus(orderId, order.status as any, 'CANCELLED', {
-    reason: order.status === 'PENDING_PAYMENT' ? 'Cancelled before payment' : 'Cancelled by user — refund issued',
+    reason: order.status === 'PENDING_PAYMENT'
+      ? 'Cancelled before payment'
+      : order.caOrderId
+      ? `Cancelled by user — CA order ${order.caOrderId} cancelled, refund issued`
+      : 'Cancelled by user — refund issued',
     changedBy: userId,
   });
 
-  // Send cancellation email
-  const owner = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, firstName: true } });
-  if (owner) Email.sendOrderCancelledEmail(owner.email, owner.firstName, order.commonName || '', order.orderNumber);
+  const owner = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true, firstName: true },
+  });
+  if (owner) {
+    Email.sendOrderCancelledEmail(owner.email, owner.firstName, order.commonName || '', order.orderNumber);
+  }
 
-  return { message: 'Order cancelled successfully.' };
+  return { message: 'Order cancelled and refund processed.' };
 };

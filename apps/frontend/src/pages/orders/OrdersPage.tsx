@@ -39,7 +39,7 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; icon: any }>
   EXPIRED:            { label: 'Expired',            color: 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400',       icon: AlertTriangle },
 };
 
-const CANCELLABLE = ['PENDING_PAYMENT', 'PAID', 'PENDING_VALIDATION'];
+const CANCELLABLE = ['PENDING_PAYMENT', 'PAID', 'PENDING_VALIDATION', 'PENDING_ISSUANCE'];
 const PENDING_STATUSES = ['PAID', 'PENDING_VALIDATION', 'VALIDATING', 'PENDING_ISSUANCE'];
 const STATUSES = ['PENDING_PAYMENT', 'PAID', 'PENDING_VALIDATION', 'VALIDATING', 'PENDING_ISSUANCE', 'ISSUED', 'CANCELLED', 'REFUNDED', 'EXPIRED'];
 const PRODUCT_TYPES = ['DV', 'OV', 'EV', 'WILDCARD', 'MULTI_DOMAIN'];

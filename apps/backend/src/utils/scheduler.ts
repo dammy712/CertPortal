@@ -1,5 +1,5 @@
 import { runExpiryCheck } from '../services/monitoring.service';
-import { pollCAStatus, submitToCA } from '../services/issuance.service';
+import { pollCAStatus } from '../services/issuance.service';
 import { prisma } from './prisma';
 import { logger } from '../utils/logger';
 
@@ -25,67 +25,38 @@ const runJob = async () => {
 };
 
 // ─── CA Status Poller ─────────────────────────────────
-// Two jobs in one:
-// 1. Poll PENDING_ISSUANCE orders that have a caOrderId — check if cert is issued
-// 2. Retry PENDING_ISSUANCE orders with no caOrderId that are past their backoff window
+// Checks orders stuck in PENDING_ISSUANCE and polls the CA for updates.
+// Runs every 5 minutes. When a cert is issued the issuance service
+// downloads it and notifies the user automatically.
 
 const runCAPoller = async () => {
   try {
-    const now = new Date();
-
-    // ── Job 1: Poll orders already submitted to CA ──
     const pendingOrders = await prisma.certificateOrder.findMany({
       where: {
         status: 'PENDING_ISSUANCE',
-        caOrderId: { not: null },
+        caOrderId: { not: null },        // Only orders already submitted to CA
       },
       select: { id: true, orderNumber: true, caProvider: true, caOrderId: true },
-      take: 50,
+      take: 50,                          // Process at most 50 at a time
     });
 
-    if (pendingOrders.length > 0) {
-      logger.info(`[CA Poller] Polling ${pendingOrders.length} pending order(s)...`);
-      let issued = 0;
-      for (const order of pendingOrders) {
-        try {
-          const status = await pollCAStatus(order.id);
-          if (status.status === 'issued') issued++;
-        } catch (err: any) {
-          logger.debug(`[CA Poller] Order ${order.orderNumber}: ${err.message}`);
-        }
-        // Small delay to avoid rate limits
-        await new Promise(r => setTimeout(r, 300));
+    if (pendingOrders.length === 0) return;
+
+    logger.info(`[CA Poller] Checking ${pendingOrders.length} pending order(s)...`);
+
+    let issued = 0;
+    for (const order of pendingOrders) {
+      try {
+        const status = await pollCAStatus(order.id);
+        if (status.status === 'issued') issued++;
+      } catch (err: any) {
+        // Log per-order errors quietly — don't crash the whole job
+        logger.debug(`[CA Poller] Order ${order.orderNumber}: ${err.message}`);
       }
-      if (issued > 0) logger.info(`[CA Poller] ${issued} certificate(s) issued this round.`);
     }
 
-    // ── Job 2: Retry failed submissions past their backoff ──
-    const retryOrders = await prisma.certificateOrder.findMany({
-      where: {
-        status: 'PENDING_ISSUANCE',
-        caOrderId: null,          // Not yet submitted
-        caAttempts: { gt: 0 },   // Has been tried before
-        caLastError: { not: null },
-        OR: [
-          { caRetryAfter: null },                    // No backoff set
-          { caRetryAfter: { lte: now } },            // Backoff expired
-        ],
-      },
-      select: { id: true, orderNumber: true, caAttempts: true },
-      take: 10,
-    });
-
-    if (retryOrders.length > 0) {
-      logger.info(`[CA Poller] Retrying ${retryOrders.length} failed submission(s)...`);
-      for (const order of retryOrders) {
-        try {
-          logger.info(`[CA Poller] Retrying order ${order.orderNumber} (prev attempts: ${order.caAttempts})`);
-          await submitToCA(order.id);
-        } catch (err: any) {
-          logger.warn(`[CA Poller] Retry failed for ${order.orderNumber}: ${err.message}`);
-        }
-        await new Promise(r => setTimeout(r, 500));
-      }
+    if (issued > 0) {
+      logger.info(`[CA Poller] ${issued} certificate(s) issued this round.`);
     }
 
   } catch (err) {
