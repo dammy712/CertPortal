@@ -8,12 +8,18 @@ import { useEffect } from 'react';
 import AuthLayout from '@/layouts/AuthLayout';
 import DashboardLayout from '@/layouts/DashboardLayout';
 
+// Guards
+import KycGuard from '@/components/KycGuard';
+
 // Pages - Auth
 import LoginPage from '@/pages/auth/LoginPage';
 import RegisterPage from '@/pages/auth/RegisterPage';
 import ForgotPasswordPage  from '@/pages/auth/ForgotPasswordPage';
 import ResetPasswordPage   from '@/pages/auth/ResetPasswordPage';
 import VerifyEmailPage     from '@/pages/auth/VerifyEmailPage';
+
+// Pages - KYC
+import KycRequiredPage from '@/pages/kyc/KycRequiredPage';
 
 // Pages - Customer
 import DashboardPage from '@/pages/dashboard/DashboardPage';
@@ -54,24 +60,31 @@ export default function App() {
           <Route path="/verify-email/:token"   element={<VerifyEmailPage />} />
         </Route>
 
-        {/* Protected Customer Routes */}
+        {/* Dashboard shell — requires authentication */}
         <Route element={<DashboardLayout />}>
-          <Route path="/dashboard" element={<DashboardPage />} />
-          <Route path="/orders" element={<OrdersPage />} />
-          <Route path="/orders/new" element={<NewOrderPage />} />
-          <Route path="/orders/:id" element={<OrderDetailPage />} />
+
+          {/* KYC pages — accessible without KYC approval */}
+          <Route path="/kyc-required" element={<KycRequiredPage />} />
           <Route path="/kyc" element={<KycPage />} />
-          <Route path="/orders/:orderId/validate" element={<ValidationPage />} />
-          <Route path="/certificates" element={<CertificatesPage />} />
-          <Route path="/notifications" element={<NotificationsPage />} />
-          <Route path="/profile" element={<ProfilePage />} />
-          <Route path="/products" element={<ProductsPage />} />
-          <Route path="/admin" element={<AdminPanel />} />
-          <Route path="/convert" element={<ConversionPage />} />
-          <Route path="/verify" element={<VerifyPage />} />
-          <Route path="/wallet" element={<WalletPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/settings/2fa" element={<TwoFactorSetupPage />} />
+
+          {/* KYC Guard — all routes below require approved KYC */}
+          <Route element={<KycGuard />}>
+            <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/orders" element={<OrdersPage />} />
+            <Route path="/orders/new" element={<NewOrderPage />} />
+            <Route path="/orders/:id" element={<OrderDetailPage />} />
+            <Route path="/orders/:orderId/validate" element={<ValidationPage />} />
+            <Route path="/certificates" element={<CertificatesPage />} />
+            <Route path="/notifications" element={<NotificationsPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
+            <Route path="/products" element={<ProductsPage />} />
+            <Route path="/admin" element={<AdminPanel />} />
+            <Route path="/convert" element={<ConversionPage />} />
+            <Route path="/verify" element={<VerifyPage />} />
+            <Route path="/wallet" element={<WalletPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings/2fa" element={<TwoFactorSetupPage />} />
+          </Route>
         </Route>
 
         {/* Redirects */}
