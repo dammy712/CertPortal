@@ -271,6 +271,7 @@ model KycDocument {
 
 model CertificateProduct {
   id              String          @id @default(uuid())
+<<<<<<< HEAD
   name            String          @unique
   slug            String?         @unique  // URL-friendly identifier
   type            CertificateType
@@ -282,13 +283,24 @@ model CertificateProduct {
   supportsWildcard Boolean        @default(false)
   isActive        Boolean         @default(true)
   sortOrder       Int             @default(0)  // For controlling display order in shop
+=======
+  name            String
+  type            CertificateType
+  description     String?
+  maxSans         Int             @default(1)
+  supportsWildcard Boolean        @default(false)
+  isActive        Boolean         @default(true)
+>>>>>>> 44a6065 (Initial commit - CertPortal with auth fixes and notifications)
   prices          ProductPrice[]
   orders          CertificateOrder[]
 
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
+<<<<<<< HEAD
   @@index([caProvider])
+=======
+>>>>>>> 44a6065 (Initial commit - CertPortal with auth fixes and notifications)
   @@map("certificate_products")
 }
 
@@ -338,7 +350,10 @@ model CertificateOrder {
   keySize           Int?
 
   // CA Reference
+<<<<<<< HEAD
   caProvider        String?      // "certum" | "globalsign" — copied from product at order time
+=======
+>>>>>>> 44a6065 (Initial commit - CertPortal with auth fixes and notifications)
   caOrderId         String?
   caStatus          String?
 

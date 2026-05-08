@@ -76,7 +76,7 @@ export default function DashboardLayout() {
               key={to}
               to={to}
               onClick={() => setSidebarOpen(false)}
-              className={({ isActive }) => cn(
+              className={({ isActive }: { isActive: boolean }) => cn(
                 'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors',
                 isActive
                   ? 'bg-primary text-primary-foreground'
@@ -95,7 +95,7 @@ export default function DashboardLayout() {
               </div>
               {adminNavItems.map(({ to, icon: Icon, label }) => (
                 <NavLink key={to} to={to} onClick={() => setSidebarOpen(false)}
-                  className={({ isActive }) => cn(
+                  className={({ isActive }: { isActive: boolean }) => cn(
                     'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors',
                     isActive ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                   )}>

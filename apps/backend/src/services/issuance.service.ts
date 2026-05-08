@@ -4,157 +4,146 @@ import { BadRequestError, NotFoundError, ForbiddenError } from '../utils/errors'
 import { uploadFile, getSignedUrl } from '../utils/fileUpload';
 import { logger } from '../utils/logger';
 import * as Email from '../utils/email';
-import { resolveProvider } from './ca';
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import crypto from 'crypto';
 
-// ─── Poll CA for order status and store cert if issued ──
-// This is the ONLY function the scheduler should call.
-// It checks Certum, and if the cert is ready, downloads and stores it.
+// ─── Generate Certificate (Dev: self-signed via openssl) ──
 
-export const pollCAStatus = async (orderId: string): Promise<{ status: string; caRawStatus?: string }> => {
+const generateCertificate = async (order: any): Promise<{
+  certPem: string;
+  chainPem: string;
+  serialNumber: string;
+  thumbprint: string;
+  issuedAt: Date;
+  expiresAt: Date;
+}> => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cert-'));
+
+  try {
+    const commonName = (order.commonName || 'localhost').replace(/^\*\./, 'wildcard.');
+    const sans = order.sans?.length ? order.sans : [order.commonName || 'localhost'];
+
+    const validityDays = order.validity === 'THREE_YEARS' ? 1095
+      : order.validity === 'TWO_YEARS' ? 730 : 365;
+
+    const keyPath  = path.join(tmpDir, 'key.pem');
+    const csrPath  = path.join(tmpDir, 'csr.pem');
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const extPath  = path.join(tmpDir, 'ext.cnf');
+
+    const sanList = sans.map((s: string, i: number) => `DNS.${i + 1} = ${s}`).join('\n');
+    const extContent = `[req]\ndistinguished_name = req_distinguished_name\n[req_distinguished_name]\n[v3_req]\nsubjectAltName = @alt_names\n[alt_names]\n${sanList}\n[SAN]\n${sanList}`;
+    fs.writeFileSync(extPath, extContent);
+
+    execSync(`openssl genrsa -out "${keyPath}" 2048 2>/dev/null`);
+    execSync(`openssl req -new -key "${keyPath}" -out "${csrPath}" -subj "/CN=${commonName}/O=CertPortal Dev/C=NG" 2>/dev/null`);
+    execSync(
+      `openssl x509 -req -in "${csrPath}" -signkey "${keyPath}" -out "${certPath}" -days ${validityDays} -extensions SAN -extfile "${extPath}" 2>/dev/null`
+    );
+
+    const certPem = fs.readFileSync(certPath, 'utf8');
+
+    const thumbprint = execSync(`openssl x509 -in "${certPath}" -fingerprint -sha1 -noout 2>/dev/null`)
+      .toString().replace('SHA1 Fingerprint=', '').trim();
+
+    const serialNumber = execSync(`openssl x509 -in "${certPath}" -serial -noout 2>/dev/null`)
+      .toString().replace('serial=', '').trim();
+
+    const notBeforeRaw = execSync(`openssl x509 -in "${certPath}" -noout -startdate 2>/dev/null`).toString().replace('notBefore=', '').trim();
+    const notAfterRaw  = execSync(`openssl x509 -in "${certPath}" -noout -enddate 2>/dev/null`).toString().replace('notAfter=', '').trim();
+
+    const issuedAt  = new Date(notBeforeRaw);
+    const expiresAt = new Date(notAfterRaw);
+
+    const chainPem = certPem;
+
+    return { certPem, chainPem, serialNumber, thumbprint, issuedAt, expiresAt };
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+};
+
+// ─── Issue Certificate ────────────────────────────────
+
+export const issueCertificate = async (orderId: string, adminId?: string) => {
   const order = await prisma.certificateOrder.findUnique({
     where: { id: orderId },
     include: { product: true, user: true },
   });
 
   if (!order) throw new NotFoundError('Order not found.');
-
-  // Already issued — nothing to do
-  if ((order.status as string) === 'ISSUED') return { status: 'issued' };
-
-  if (!order.caOrderId) {
-    return { status: 'pending', caRawStatus: 'no_ca_order_id' };
+  if (order.status !== 'PENDING_ISSUANCE') {
+    throw new BadRequestError(`Order is not ready for issuance. Current status: ${order.status}`);
   }
 
-  const provider = resolveProvider(order.caProvider || order.product.caProvider);
-  logger.debug(`[CA Poll] Checking ${provider.name} order ${order.caOrderId} for ${order.orderNumber}`);
-
-  const caStatus = await provider.getOrderStatus(order.caOrderId);
-
-  // Update caStatus in DB for tracking
-  await prisma.certificateOrder.update({
-    where: { id: orderId },
-    data: { caStatus: caStatus.caRawStatus || caStatus.status },
-  });
-
-  if (caStatus.status !== 'issued') {
-    logger.debug(`[CA Poll] ${order.orderNumber}: CA status = ${caStatus.caRawStatus} (not yet issued)`);
-    return { status: caStatus.status, caRawStatus: caStatus.caRawStatus };
-  }
-
-  // CA says ENROLLED — check for idempotency before creating cert
   const existing = await prisma.certificate.findUnique({ where: { orderId } });
-  if (existing) {
-    // Already stored — just make sure order status is ISSUED
-    if ((order.status as string) !== 'ISSUED') {
-      await prisma.certificateOrder.update({
-        where: { id: orderId },
-        data: { status: 'ISSUED' },
-      });
-    }
-    logger.info(`[CA Poll] ${order.orderNumber}: cert already in DB, marking ISSUED`);
-    return { status: 'issued' };
-  }
+  if (existing) throw new BadRequestError('Certificate already issued for this order.');
 
-  // Download the actual certificate from Certum
-  logger.info(`[CA Poll] ${order.orderNumber}: ENROLLED — downloading certificate from Certum`);
+  logger.info(`Issuing certificate for order ${orderId}...`);
 
-  let download;
-  try {
-    download = await provider.downloadCertificate(order.caOrderId);
-  } catch (err: any) {
-    logger.warn(`[CA Poll] Failed to download cert for ${order.orderNumber}: ${err.message}`);
-    return { status: 'processing', caRawStatus: 'download_failed' };
-  }
+  const { certPem, chainPem, serialNumber, thumbprint, issuedAt, expiresAt } =
+    await generateCertificate(order);
 
-  // Store the PEM files
-  const certBuffer  = Buffer.from(download.certificatePem, 'utf8');
-  const chainBuffer = Buffer.from(download.chainPem || download.certificatePem, 'utf8');
+  const certBuffer = Buffer.from(certPem, 'utf8');
+  const chainBuffer = Buffer.from(chainPem, 'utf8');
 
-  const { key: certKey }  = await uploadFile(certBuffer,  `${order.orderNumber}.crt`,       'application/x-pem-file', `certificates/${order.userId}`);
+  const { key: certKey } = await uploadFile(certBuffer, `${order.orderNumber}.crt`, 'application/x-pem-file', `certificates/${order.userId}`);
   const { key: chainKey } = await uploadFile(chainBuffer, `${order.orderNumber}-chain.crt`, 'application/x-pem-file', `certificates/${order.userId}`);
 
   const certificate = await prisma.certificate.create({
     data: {
       orderId,
-      serialNumber:   download.serialNumber || order.caOrderId,
-      thumbprint:     download.serialNumber || '',
-      commonName:     order.commonName || '',
-      issuerName:     'Certum',
+      serialNumber,
+      thumbprint,
+      commonName: order.commonName || '',
+      issuerName: 'CertPortal Dev CA',
       subjectAltNames: order.sans || [],
-      certFileKey:    certKey,
-      chainFileKey:   chainKey,
-      issuedAt:       download.issuedAt  || new Date(),
-      expiresAt:      download.expiresAt || new Date(Date.now() + 199 * 24 * 60 * 60 * 1000),
+      certFileKey: certKey,
+      chainFileKey: chainKey,
+      issuedAt,
+      expiresAt,
     },
   });
 
-  // Mark order as ISSUED
   await prisma.certificateOrder.update({
     where: { id: orderId },
     data: { status: 'ISSUED', caStatus: 'issued' },
   });
-
   await logOrderStatus(orderId, 'PENDING_ISSUANCE', 'ISSUED', {
-    reason: 'Certificate downloaded from Certum CA',
-    note:   `CA Order: ${order.caOrderId} | Serial: ${download.serialNumber}`,
+    reason: 'Certificate issued by Certificate Authority',
+    note: `Certificate serial: ${certificate.serialNumber || 'N/A'}`,
     changedBy: 'system',
   });
 
-  // Notify user
   await prisma.notification.create({
     data: {
-      userId:  order.userId,
-      type:    'CERT_ISSUED',
+      userId: order.userId,
+      type: 'CERT_ISSUED',
       channel: 'IN_APP',
-      title:   '🎉 Your Certificate is Ready!',
+      title: '🎉 Your Certificate is Ready!',
       message: `Your SSL certificate for ${order.commonName} has been issued and is ready to download.`,
       metadata: { orderId, certificateId: certificate.id },
     },
   });
 
-  const owner = await prisma.user.findUnique({
-    where: { id: order.userId },
-    select: { email: true, firstName: true },
+  await prisma.auditLog.create({
+    data: {
+      userId: adminId || order.userId,
+      action: 'CERT_DOWNLOADED',
+      resourceId: certificate.id,
+      metadata: { orderId, commonName: order.commonName, issuedBy: adminId ? 'admin' : 'system' },
+    },
   });
-  if (owner) {
-    Email.sendCertificateIssuedEmail(owner.email, owner.firstName, order.commonName || '', certificate.expiresAt, orderId);
-  }
 
-  logger.info(`[CA Poll] Certificate stored for ${order.orderNumber}: serial ${download.serialNumber}`);
-  return { status: 'issued' };
-};
+  logger.info(`Certificate issued: ${certificate.id} for ${order.commonName}`);
 
-// ─── Issue Certificate (admin manual trigger) ─────────
-// Only used by admin to manually force-check a specific order.
-// Do NOT call this in a loop — use pollCAStatus instead.
+  const owner = await prisma.user.findUnique({ where: { id: order.userId }, select: { email: true, firstName: true } });
+  if (owner) Email.sendCertificateIssuedEmail(owner.email, owner.firstName, order.commonName || '', certificate.expiresAt, order.id);
 
-export const issueCertificate = async (orderId: string, adminId?: string): Promise<any> => {
-  const order = await prisma.certificateOrder.findUnique({
-    where: { id: orderId },
-    include: { product: true },
-  });
-  if (!order) throw new NotFoundError('Order not found.');
-
-  // Idempotency check — never issue twice
-  const existing = await prisma.certificate.findUnique({ where: { orderId } });
-  if (existing) {
-    logger.warn(`issueCertificate called on already-issued order ${orderId} — returning existing cert`);
-    return existing;
-  }
-
-  if (!order.caOrderId) {
-    throw new BadRequestError('Order has not been submitted to the CA yet.');
-  }
-
-  // Delegate to pollCAStatus which handles everything correctly
-  logger.info(`Admin-triggered cert download for order ${orderId}`);
-  const result = await pollCAStatus(orderId);
-
-  if (result.status !== 'issued') {
-    throw new BadRequestError(`Certificate not ready yet — CA status: ${result.caRawStatus || result.status}`);
-  }
-
-  return prisma.certificate.findUnique({ where: { orderId } });
+  return certificate;
 };
 
 // ─── Get Certificate for Order ────────────────────────
@@ -199,9 +188,10 @@ export const downloadCertificate = async (
   if (certificate.order.userId !== userId) throw new ForbiddenError('Access denied.');
 
   let fileKey: string | null = null;
-  if (fileType === 'cert')           fileKey = certificate.certFileKey;
-  else if (fileType === 'chain')     fileKey = certificate.chainFileKey;
-  else if (fileType === 'fullchain') fileKey = certificate.certFileKey; // fullchain = cert + chain combined
+
+  if (fileType === 'cert')      fileKey = certificate.certFileKey;
+  else if (fileType === 'chain') fileKey = certificate.chainFileKey;
+  else if (fileType === 'fullchain') fileKey = certificate.certFileKey;
 
   if (!fileKey) throw new NotFoundError('File not available.');
 
@@ -224,9 +214,15 @@ export const downloadCertificate = async (
 export const listCertificates = async (
   userId: string,
   filters: {
-    page?: number; limit?: number; status?: string; search?: string;
-    productType?: string; expiryFrom?: string; expiryTo?: string;
-    dateFrom?: string; dateTo?: string;
+    page?: number;
+    limit?: number;
+    status?: string;
+    search?: string;
+    productType?: string;
+    expiryFrom?: string;
+    expiryTo?: string;
+    dateFrom?: string;
+    dateTo?: string;
   } = {}
 ) => {
   const { page = 1, limit = 10, status, search, productType, expiryFrom, expiryTo, dateFrom, dateTo } = filters;
@@ -249,10 +245,11 @@ export const listCertificates = async (
     where.OR = [
       { commonName:   { contains: search, mode: 'insensitive' } },
       { serialNumber: { contains: search, mode: 'insensitive' } },
+      { thumbprint:   { contains: search, mode: 'insensitive' } },
     ];
   }
   if (expiryFrom || expiryTo) {
-    where.expiresAt = {};
+    where.expiresAt = where.expiresAt || {};
     if (expiryFrom) where.expiresAt.gte = new Date(expiryFrom);
     if (expiryTo)   where.expiresAt.lte = new Date(expiryTo);
   }
@@ -268,7 +265,8 @@ export const listCertificates = async (
       include: {
         order: {
           select: {
-            orderNumber: true, validity: true,
+            orderNumber: true,
+            validity: true,
             product: { select: { name: true, type: true } },
           },
         },
@@ -290,7 +288,7 @@ export const listCertificates = async (
   };
 };
 
-// ─── Admin: Manual issue trigger ─────────────────────
+// ─── Admin: Issue manually ────────────────────────────
 
 export const adminIssueCertificate = async (adminId: string, orderId: string) => {
   const order = await prisma.certificateOrder.findUnique({ where: { id: orderId } });
@@ -304,6 +302,10 @@ export const adminIssueCertificate = async (adminId: string, orderId: string) =>
     await prisma.certificateOrder.update({
       where: { id: orderId },
       data: { status: 'PENDING_ISSUANCE' },
+    });
+    await logOrderStatus(order.id, order.status as any, 'PENDING_ISSUANCE', {
+      reason: 'Submitted to Certificate Authority for issuance',
+      changedBy: 'system',
     });
   }
 
