@@ -1,12 +1,12 @@
 import axios from 'axios';
 import { useAuthStore } from '@/stores/authStore';
-
+ 
 const api = axios.create({
   baseURL: '/api/v1',
   withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
 });
-
+ 
 // ─── Request Interceptor — attach access token ────────
 api.interceptors.request.use((config) => {
   const token = useAuthStore.getState().accessToken;
@@ -15,11 +15,11 @@ api.interceptors.request.use((config) => {
   }
   return config;
 });
-
+ 
 // ─── Response Interceptor — auto refresh token ────────
 let isRefreshing = false;
 let failedQueue: Array<{ resolve: (token: string) => void; reject: (err: unknown) => void }> = [];
-
+ 
 const processQueue = (error: unknown, token: string | null = null) => {
   failedQueue.forEach(({ resolve, reject }) => {
     if (error) reject(error);
@@ -27,13 +27,21 @@ const processQueue = (error: unknown, token: string | null = null) => {
   });
   failedQueue = [];
 };
-
+ 
+// Auth endpoints that should NEVER trigger token refresh
+const AUTH_ENDPOINTS = ['/auth/login', '/auth/register', '/auth/forgot-password', '/auth/reset-password'];
+ 
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
-
-    if (error.response?.status === 401 && !originalRequest._retry) {
+ 
+    // Never attempt token refresh for auth endpoints — let the error propagate naturally
+    const isAuthEndpoint = AUTH_ENDPOINTS.some((endpoint) =>
+      originalRequest?.url?.includes(endpoint)
+    );
+ 
+    if (error.response?.status === 401 && !originalRequest._retry && !isAuthEndpoint) {
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject });
@@ -42,10 +50,10 @@ api.interceptors.response.use(
           return api(originalRequest);
         });
       }
-
+ 
       originalRequest._retry = true;
       isRefreshing = true;
-
+ 
       try {
         const response = await api.post('/auth/refresh');
         const newToken = response.data.data.accessToken;
@@ -68,9 +76,9 @@ api.interceptors.response.use(
         isRefreshing = false;
       }
     }
-
+ 
     return Promise.reject(error);
   }
 );
-
+ 
 export default api;
