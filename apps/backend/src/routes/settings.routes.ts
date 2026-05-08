@@ -9,4 +9,11 @@ router.use(authenticate, requireAdmin);
 router.get('/invoice',  SettingsController.getInvoiceSettings);
 router.put('/invoice',  SettingsController.saveInvoiceSettings);
 
+// Pricing / exchange rate settings
+router.get('/pricing',  SettingsController.getPricingSettings);
+router.put('/pricing',  SettingsController.savePricingSettings);
+
+// Product price management (update individual product prices)
+router.put('/products/:productId/prices', SettingsController.updateProductPrices);
+
 export default router;

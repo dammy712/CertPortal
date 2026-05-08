@@ -10,6 +10,9 @@ router.get('/', IssuanceController.listCertificates);
 router.get('/order/:orderId', IssuanceController.getCertificate);
 router.get('/:id/download', IssuanceController.downloadCertificate);
 
+// Customer-triggered CA status check — polls Certum immediately for an order
+router.post('/check-status/:orderId', IssuanceController.checkCAStatus);
+
 // Admin
 router.post('/admin/issue/:orderId', requireAdmin, IssuanceController.adminIssueCertificate);
 

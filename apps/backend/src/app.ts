@@ -1,4 +1,5 @@
 import express, { Application, Request, Response, NextFunction } from 'express';
+import path from 'path';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
@@ -71,6 +72,9 @@ if (process.env.NODE_ENV !== 'test') {
     stream: { write: (message) => logger.http(message.trim()) },
   }));
 }
+
+// ── Static file serving for certificate downloads ────
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // ── Health Check ──────────────────────────────────────
 app.get('/health', (_req: Request, res: Response) => {

@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError, AppError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import * as Email from '../utils/email';
 import { execSync } from 'child_process';
+import { issueCertificate } from './issuance.service';
 
 // ─── Helpers ──────────────────────────────────────────
 
@@ -52,9 +53,10 @@ export const decodeCSR = async (csr: string) => {
 
     let decoded: any = {};
     try {
-      const output = execSync(`openssl req -in ${tmpFile} -noout -text 2>/dev/null`, {
+      const output = execSync(`openssl req -in "${tmpFile}" -noout -text`, {
         timeout: 5000,
         encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'], // Capture stderr instead of redirecting
       });
 
       // Parse Subject
@@ -80,7 +82,7 @@ export const decodeCSR = async (csr: string) => {
       const keyMatch = output.match(/Public Key Algorithm:\s*(.+)/);
       if (keyMatch) decoded.keyAlgorithm = keyMatch[1].trim();
 
-      const keySizeMatch = output.match(/RSA Public-Key:\s*\((\d+)/);
+      const keySizeMatch = output.match(/(?:RSA Public-Key|Public-Key):\s*\((\d+)/);
       if (keySizeMatch) decoded.keySize = parseInt(keySizeMatch[1]);
 
     } finally {
@@ -155,7 +157,7 @@ export const createOrder = async (
 
   // Create order + deduct wallet atomically
   const result = await prisma.$transaction(async (tx) => {
-    // Create the order
+    // Create the order — copy caProvider from product so issuance knows which CA
     const order = await tx.certificateOrder.create({
       data: {
         orderNumber,
@@ -174,6 +176,7 @@ export const createOrder = async (
         locality: data.locality,
         email: data.email,
         sans: data.sans || [],
+        caProvider: product.caProvider,   // carry over from product
       },
       include: { product: true },
     });
@@ -230,6 +233,18 @@ export const createOrder = async (
   });
 
   logger.info(`Order created: ${orderNumber} for user ${userId}`);
+
+  // Fire-and-forget CA submission — don't block the HTTP response
+  // DV certs can be auto-issued; OV/EV will sit at PENDING_ISSUANCE until admin forwards docs
+  setImmediate(async () => {
+    try {
+      await issueCertificate(result.id);
+      logger.info(`CA submission triggered for order ${result.orderNumber}`);
+    } catch (err: any) {
+      // Log but don't throw — the order is already created and paid
+      logger.error(`CA submission failed for order ${result.orderNumber}: ${err.message}`);
+    }
+  });
 
   return result;
 };
@@ -316,13 +331,33 @@ export const getOrderById = async (orderId: string, userId: string) => {
 export const cancelOrder = async (orderId: string, userId: string) => {
   const order = await prisma.certificateOrder.findFirst({
     where: { id: orderId, userId },
+    include: { product: { select: { caProvider: true } } },
   });
   if (!order) throw new NotFoundError('Order not found.');
-  if (!['PENDING_PAYMENT', 'PAID', 'PENDING_VALIDATION'].includes(order.status)) {
-    throw new BadRequestError('This order cannot be cancelled at its current stage.');
+
+  const cancellable = ['PENDING_PAYMENT', 'PAID', 'PENDING_VALIDATION', 'PENDING_ISSUANCE'];
+  if (!cancellable.includes(order.status)) {
+    throw new BadRequestError(
+      order.status === 'ISSUED'
+        ? 'Certificate already issued. Revoke the certificate instead of cancelling.'
+        : 'This order cannot be cancelled at its current stage.'
+    );
   }
 
-  // Refund wallet if already paid
+  // If already submitted to Certum, cancel on their side first
+  if (order.caOrderId && order.status === 'PENDING_ISSUANCE') {
+    try {
+      const { resolveProvider } = await import('./ca');
+      const provider = resolveProvider(order.caProvider || order.product?.caProvider);
+      await provider.cancelOrder(order.caOrderId);
+      logger.info(`Certum order ${order.caOrderId} cancelled successfully`);
+    } catch (err: any) {
+      // Log but don't block the local cancel — Certum may have already rejected it
+      logger.warn(`Could not cancel order on Certum (${order.caOrderId}): ${err.message}`);
+    }
+  }
+
+  // Refund wallet if payment was taken (any status except PENDING_PAYMENT)
   if (order.status !== 'PENDING_PAYMENT') {
     const wallet = await prisma.wallet.findUnique({ where: { userId } });
     if (wallet) {
@@ -356,15 +391,22 @@ export const cancelOrder = async (orderId: string, userId: string) => {
     });
   }
 
-  // Log CANCELLED status
   await logOrderStatus(orderId, order.status as any, 'CANCELLED', {
-    reason: order.status === 'PENDING_PAYMENT' ? 'Cancelled before payment' : 'Cancelled by user — refund issued',
+    reason: order.status === 'PENDING_PAYMENT'
+      ? 'Cancelled before payment'
+      : order.caOrderId
+      ? `Cancelled by user — CA order ${order.caOrderId} cancelled, refund issued`
+      : 'Cancelled by user — refund issued',
     changedBy: userId,
   });
 
-  // Send cancellation email
-  const owner = await prisma.user.findUnique({ where: { id: userId }, select: { email: true, firstName: true } });
-  if (owner) Email.sendOrderCancelledEmail(owner.email, owner.firstName, order.commonName || '', order.orderNumber);
+  const owner = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true, firstName: true },
+  });
+  if (owner) {
+    Email.sendOrderCancelledEmail(owner.email, owner.firstName, order.commonName || '', order.orderNumber);
+  }
 
-  return { message: 'Order cancelled successfully.' };
+  return { message: 'Order cancelled and refund processed.' };
 };

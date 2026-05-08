@@ -116,6 +116,7 @@ export default function AdminPanel() {
     { id: 'orders',        label: 'Orders',            icon: FileText },
     { id: 'certificates',  label: 'Certificates',      icon: ShieldCheck },
     { id: 'products',      label: 'Products',          icon: RefreshCw },
+    { id: 'pricing',       label: 'Pricing',           icon: SlidersHorizontal },
     { id: 'audit',         label: 'Audit Logs',        icon: Activity },
     { id: 'invoice',       label: 'Invoice Settings',  icon: FileText },
     ...(currentUser?.role === 'SUPER_ADMIN' ? [{ id: 'admins', label: 'Admin Management', icon: Shield }] : []),
@@ -150,6 +151,7 @@ export default function AdminPanel() {
       {tab === 'orders'       && <OrdersTab />}
       {tab === 'certificates' && <CertificatesTab showToast={showToast} />}
       {tab === 'products' && <ProductsTab showToast={showToast} />}
+      {tab === 'pricing'  && <PricingTab showToast={showToast} />}
       {tab === 'audit'    && <AuditTab />}
       {tab === 'invoice'  && <InvoiceSettingsTab showToast={showToast} />}
       {tab === 'admins'   && <AdminManagementTab showToast={showToast} currentUser={currentUser} />}
@@ -1900,6 +1902,225 @@ function AnalyticsTab() {
         </div>
       </div>
 
+    </div>
+  );
+}
+
+// ─── Pricing Tab ───────────────────────────────────────
+
+const VALIDITY_MAP: Record<string, string> = {
+  ONE_YEAR: '1 Year', TWO_YEARS: '2 Years', THREE_YEARS: '3 Years',
+};
+
+function PricingTab({ showToast }: { showToast: any }) {
+  const [pricing, setPricing] = useState<any>(null);
+  const [products, setProducts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [savingProductId, setSavingProductId] = useState<string | null>(null);
+  const [editPrices, setEditPrices] = useState<Record<string, Record<string, string>>>({});
+
+  useEffect(() => {
+    Promise.all([
+      adminApi.getPricingSettings(),
+      adminApi.getCAStatus(),
+      fetch('/api/v1/admin/products', {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+      }).then(r => r.json()),
+    ]).then(([pricingRes, _caStatus, productsRes]) => {
+      setPricing(pricingRes.data);
+      const prods = productsRes.data || [];
+      setProducts(prods);
+      // Initialise edit state
+      const initial: Record<string, Record<string, string>> = {};
+      prods.forEach((p: any) => {
+        initial[p.id] = {};
+        (p.prices || []).forEach((pr: any) => {
+          initial[p.id][pr.validity] = String(Number(pr.priceNgn));
+        });
+      });
+      setEditPrices(initial);
+    }).catch(console.error).finally(() => setLoading(false));
+  }, []);
+
+  const handleSaveRates = async () => {
+    setSaving(true);
+    try {
+      const res = await adminApi.savePricingSettings({
+        usdToNgn: Number(pricing.usdToNgn),
+        eurToNgn: Number(pricing.eurToNgn),
+        plnToNgn: Number(pricing.plnToNgn),
+        markupPercent: Number(pricing.markupPercent),
+      });
+      setPricing(res.data);
+      showToast('Exchange rates saved successfully.');
+    } catch {
+      showToast('Failed to save exchange rates.', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSaveProductPrices = async (productId: string) => {
+    setSavingProductId(productId);
+    try {
+      const prices = Object.entries(editPrices[productId] || {})
+        .filter(([, v]) => v && Number(v) > 0)
+        .map(([validity, priceNgn]) => ({ validity, priceNgn: Number(priceNgn) }));
+
+      await adminApi.updateProductPrices(productId, prices);
+      showToast('Product prices updated.');
+    } catch {
+      showToast('Failed to update prices.', 'error');
+    } finally {
+      setSavingProductId(null);
+    }
+  };
+
+  const calcSuggestedNgn = (usdCost: number) => {
+    if (!pricing) return 0;
+    const base = usdCost * pricing.usdToNgn;
+    const withMarkup = base * (1 + pricing.markupPercent / 100);
+    return Math.ceil(withMarkup / 500) * 500;
+  };
+
+  if (loading) return (
+    <div className="flex justify-center items-center h-48">
+      <Loader2 className="w-6 h-6 animate-spin text-primary" />
+    </div>
+  );
+
+  const certumProducts = products.filter(p => p.caProvider === 'certum');
+  const gsProducts     = products.filter(p => p.caProvider === 'globalsign');
+
+  return (
+    <div className="space-y-8">
+
+      {/* Exchange Rates */}
+      <div className="bg-card border border-border rounded-2xl p-6">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h2 className="text-lg font-semibold text-foreground">Exchange Rates</h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              Set the rates used to calculate NGN prices from CA partner costs.
+              {pricing?.lastUpdated && (
+                <span className="ml-2 text-xs">Last updated: {new Date(pricing.lastUpdated).toLocaleString('en-NG')}</span>
+              )}
+            </p>
+          </div>
+          <button
+            onClick={handleSaveRates}
+            disabled={saving}
+            className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary/90 transition disabled:opacity-50"
+          >
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+            Save Rates
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {[
+            { label: '1 USD → NGN', key: 'usdToNgn', hint: 'US Dollar rate' },
+            { label: '1 EUR → NGN', key: 'eurToNgn', hint: 'Euro rate' },
+            { label: '1 PLN → NGN', key: 'plnToNgn', hint: 'Polish Zloty (Certum pricing currency)' },
+            { label: 'Markup %', key: 'markupPercent', hint: 'Added on top of CA partner cost' },
+          ].map(({ label, key, hint }) => (
+            <div key={key}>
+              <label className="block text-xs font-medium text-muted-foreground mb-1">{label}</label>
+              <input
+                type="number"
+                value={pricing?.[key] ?? ''}
+                onChange={e => setPricing((p: any) => ({ ...p, [key]: e.target.value }))}
+                className="w-full px-3 py-2 border border-border rounded-xl text-sm bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                step={key === 'markupPercent' ? '1' : '10'}
+                min="0"
+              />
+              <p className="text-xs text-muted-foreground mt-1">{hint}</p>
+            </div>
+          ))}
+        </div>
+
+        {pricing && (
+          <div className="mt-4 p-3 bg-muted/50 rounded-xl text-xs text-muted-foreground">
+            Example: A product costing $10 USD → ₦{calcSuggestedNgn(10).toLocaleString()} NGN at current rates with {pricing.markupPercent}% markup
+          </div>
+        )}
+      </div>
+
+      {/* Product Price Management */}
+      {[
+        { label: 'Certum Products', items: certumProducts, color: 'bg-blue-50 border-blue-200 dark:bg-blue-950 dark:border-blue-800' },
+        { label: 'GlobalSign Products', items: gsProducts, color: 'bg-purple-50 border-purple-200 dark:bg-purple-950 dark:border-purple-800' },
+      ].map(({ label, items, color }) => items.length > 0 && (
+        <div key={label}>
+          <h2 className="text-lg font-semibold text-foreground mb-4">{label}</h2>
+          <div className="space-y-3">
+            {items.map(product => (
+              <div key={product.id} className={`border rounded-2xl p-5 ${color}`}>
+                <div className="flex items-start justify-between gap-4 mb-4">
+                  <div>
+                    <p className="font-semibold text-foreground">{product.name}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{product.description}</p>
+                    <div className="flex gap-2 mt-1">
+                      <span className="text-xs px-2 py-0.5 bg-background border border-border rounded-full">{product.type}</span>
+                      {product.caProductCode && (
+                        <span className="text-xs px-2 py-0.5 bg-background border border-border rounded-full font-mono">
+                          Code: {product.caProductCode}
+                        </span>
+                      )}
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${product.isActive ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                        {product.isActive ? 'Active' : 'Hidden'}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleSaveProductPrices(product.id)}
+                    disabled={savingProductId === product.id}
+                    className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-primary text-primary-foreground rounded-lg text-xs font-medium hover:bg-primary/90 transition disabled:opacity-50"
+                  >
+                    {savingProductId === product.id
+                      ? <Loader2 className="w-3 h-3 animate-spin" />
+                      : <CheckCircle2 className="w-3 h-3" />}
+                    Save Prices
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  {['ONE_YEAR', 'TWO_YEARS', 'THREE_YEARS'].map(validity => (
+                    <div key={validity}>
+                      <label className="block text-xs font-medium text-muted-foreground mb-1">
+                        {VALIDITY_MAP[validity]}
+                      </label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">₦</span>
+                        <input
+                          type="number"
+                          value={editPrices[product.id]?.[validity] ?? ''}
+                          onChange={e => setEditPrices(prev => ({
+                            ...prev,
+                            [product.id]: { ...prev[product.id], [validity]: e.target.value },
+                          }))}
+                          placeholder="0"
+                          className="w-full pl-7 pr-3 py-2 border border-border rounded-xl text-sm bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                          min="0"
+                          step="500"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {products.length === 0 && (
+        <div className="text-center py-16 text-muted-foreground">
+          <SlidersHorizontal className="w-12 h-12 mx-auto mb-3 opacity-30" />
+          <p>No products found. Make sure the CA health check is running and products are active.</p>
+        </div>
+      )}
     </div>
   );
 }

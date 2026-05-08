@@ -20,7 +20,7 @@ export default function LoginPage() {
   const [requires2FA, setRequires2FA] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const { setAuth } = useAuthStore();
+  const { setAuth, clearAuth } = useAuthStore();
   const navigate = useNavigate();
 
   const { register, handleSubmit, formState: { errors } } = useForm<LoginForm>({
@@ -30,12 +30,19 @@ export default function LoginPage() {
   const onSubmit = async (data: LoginForm) => {
     setIsLoading(true);
     setError('');
+    // Clear any stale persisted session before attempting login
+    clearAuth();
     try {
       const result = await authApi.login(data);
 
       if (result.requiresTwoFactor) {
         setRequires2FA(true);
         setIsLoading(false);
+        return;
+      }
+
+      if (!result.data?.user || !result.data?.accessToken) {
+        setError('Login failed. Unexpected response from server.');
         return;
       }
 
