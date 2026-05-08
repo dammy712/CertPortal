@@ -33,7 +33,7 @@ export const uploadFile = async (
 
 export const getSignedUrl = async (key: string): Promise<string> => {
   // Local — return path directly
-  return `http://localhost:5000/uploads/${key}`;
+  return `${process.env.APP_URL || "http://localhost:3000"}/uploads/${key}`;
 };
 
 export const deleteFile = async (key: string): Promise<void> => {

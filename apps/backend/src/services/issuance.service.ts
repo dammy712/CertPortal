@@ -311,3 +311,31 @@ export const adminIssueCertificate = async (adminId: string, orderId: string) =>
 
   return issueCertificate(orderId, adminId);
 };
+
+// ─── Poll CA Status ───────────────────────────────────
+
+export const pollCAStatus = async (orderId: string) => {
+  const order = await prisma.certificateOrder.findUnique({
+    where: { id: orderId },
+    include: { product: true },
+  });
+
+  if (!order) throw new Error('Order not found.');
+
+  // If already marked as issued in DB
+  if (order.status === 'ISSUED') {
+    return { status: 'issued', caRawStatus: 'ISSUED' };
+  }
+
+  // If no CA order ID yet, it hasn't been submitted
+  if (!order.caOrderId) {
+    return { status: 'pending', caRawStatus: 'NOT_SUBMITTED' };
+  }
+
+  // Return current processing status from DB
+  const rawStatus = order.status as string;
+  return {
+    status: rawStatus === 'ISSUED' ? 'issued' : 'processing',
+    caRawStatus: rawStatus,
+  };
+};

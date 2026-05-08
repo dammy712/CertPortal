@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import * as CertController from '../controllers/certificate.controller';
 import { authenticate } from '../middleware/auth.middleware';
+import { requireKyc } from '../middleware/requireKyc.middleware';
 
 const router = Router();
 
@@ -10,6 +11,7 @@ router.get('/products/:id', CertController.getProductById);
 
 // Protected routes
 router.use(authenticate);
+router.use(requireKyc);
 
 // CSR decoder
 router.post('/decode-csr', CertController.decodeCSR);

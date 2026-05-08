@@ -1,6 +1,7 @@
 import express, { Router } from 'express';
 import * as WalletController from '../controllers/wallet.controller';
 import { authenticate } from '../middleware/auth.middleware';
+import { requireKyc } from '../middleware/requireKyc.middleware';
 import { requireAdmin } from '../middleware/auth.middleware';
 
 const router = Router();
@@ -10,6 +11,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), WalletControl
 
 // All wallet routes require authentication
 router.use(authenticate);
+router.use(requireKyc);
 
 // Customer routes
 router.get('/', WalletController.getWallet);

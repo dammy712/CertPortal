@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import * as ValidationController from '../controllers/validation.controller';
 import { authenticate, requireAdmin } from '../middleware/auth.middleware';
+import { requireKyc } from '../middleware/requireKyc.middleware';
 
 const router = Router();
 router.use(authenticate);
+router.use(requireKyc);
 
 // Customer routes
 router.post('/initialize', ValidationController.initializeValidation);
