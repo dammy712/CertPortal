@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ShieldCheck, ChevronRight, ChevronLeft,
   Loader2, CheckCircle2, AlertCircle, Upload,
-  Info, Wallet
+  Info, Wallet, RotateCcw
 } from 'lucide-react';
 import { certificateApi } from '@/api/certificate.api';
 import { walletApi } from '@/api/wallet.api';
@@ -40,6 +40,59 @@ const TYPE_BADGES: Record<string, string> = {
 
 const formatNgn = (amount: number) =>
   `₦${Number(amount).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`;
+
+// ─── Form Persistence ─────────────────────────────────
+
+const STORAGE_KEY = 'certportal_new_order_draft';
+const DRAFT_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+interface DraftData {
+  step: number;
+  selectedProduct: Product | null;
+  selectedValidity: string;
+  selectedPrice: number;
+  csrData: any | null;
+  step2: {
+    csr: string;
+    formData: {
+      commonName: string;
+      orgName: string;
+      organizationalUnit: string;
+      country: string;
+      state: string;
+      locality: string;
+      email: string;
+      sans: string;
+    };
+  };
+  savedAt: number;
+}
+
+const saveDraft = (data: Omit<DraftData, 'savedAt'>) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...data, savedAt: Date.now() }));
+  } catch {}
+};
+
+const loadDraft = (): DraftData | null => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const draft: DraftData = JSON.parse(raw);
+    // Expire after TTL
+    if (Date.now() - draft.savedAt > DRAFT_TTL_MS) {
+      localStorage.removeItem(STORAGE_KEY);
+      return null;
+    }
+    return draft;
+  } catch {
+    return null;
+  }
+};
+
+const clearDraft = () => {
+  try { localStorage.removeItem(STORAGE_KEY); } catch {}
+};
 
 // ─── Step Indicator ───────────────────────────────────
 
@@ -80,26 +133,28 @@ function StepIndicator({ current }: { current: number }) {
 
 // ─── Step 1: Select Product ───────────────────────────
 
-function Step1({ onNext, preselectedId }: {
+function Step1({ onNext, preselectedId, initialProduct, initialValidity }: {
   onNext: (product: Product, validity: string, price: number) => void;
   preselectedId?: string | null;
+  initialProduct?: Product | null;
+  initialValidity?: string;
 }) {
   const [products, setProducts] = useState<Product[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [selectedValidity, setSelectedValidity] = useState('ONE_YEAR');
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(initialProduct || null);
+  const [selectedValidity, setSelectedValidity] = useState(initialValidity || 'ONE_YEAR');
 
   useEffect(() => {
     certificateApi.getProducts().then((res) => {
       const list = res.data as Product[];
       setProducts(list);
-      if (preselectedId) {
+      if (!initialProduct && preselectedId) {
         const found = list.find(p => p.id === preselectedId);
         if (found) setSelectedProduct(found);
       }
       setIsLoading(false);
     }).catch(() => setIsLoading(false));
-  }, [preselectedId]);
+  }, [preselectedId, initialProduct]);
 
   const selectedPrice = selectedProduct?.prices.find((p) => p.validity === selectedValidity);
 
@@ -180,15 +235,18 @@ function Step1({ onNext, preselectedId }: {
 
 // ─── Step 2: CSR & Details ────────────────────────────
 
-function Step2({ product, onNext, onBack }: {
+function Step2({ product, onNext, onBack, initialCsr, initialFormData, onDraftChange }: {
   product: Product;
   onNext: (data: any) => void;
   onBack: () => void;
+  initialCsr?: string;
+  initialFormData?: any;
+  onDraftChange: (csr: string, formData: any) => void;
 }) {
-  const [csr, setCsr] = useState('');
+  const [csr, setCsr] = useState(initialCsr || '');
   const [isDecoding, setIsDecoding] = useState(false);
   const [decoded, setDecoded] = useState<any>(null);
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState(initialFormData || {
     commonName: '',
     orgName: '',
     organizationalUnit: '',
@@ -200,6 +258,11 @@ function Step2({ product, onNext, onBack }: {
   });
   const [error, setError] = useState('');
 
+  // Save draft whenever csr or formData changes
+  useEffect(() => {
+    onDraftChange(csr, formData);
+  }, [csr, formData]);
+
   const handleDecodeCSR = async () => {
     if (!csr.trim()) { setError('Please paste your CSR first.'); return; }
     setIsDecoding(true);
@@ -208,7 +271,7 @@ function Step2({ product, onNext, onBack }: {
       const result = await certificateApi.decodeCSR(csr);
       const d = result.data;
       setDecoded(d);
-      setFormData({
+      const newFormData = {
         commonName: d.commonName || '',
         orgName: d.organization || '',
         organizationalUnit: d.organizationalUnit || '',
@@ -217,7 +280,8 @@ function Step2({ product, onNext, onBack }: {
         locality: d.locality || '',
         email: d.email || '',
         sans: (d.sans || []).join(', '),
-      });
+      };
+      setFormData(newFormData);
     } catch (err: any) {
       setError(err?.response?.data?.message || 'Failed to decode CSR.');
     } finally {
@@ -232,7 +296,7 @@ function Step2({ product, onNext, onBack }: {
     onNext({
       csr,
       ...formData,
-      sans: formData.sans ? formData.sans.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      sans: formData.sans ? formData.sans.split(',').map((s: string) => s.trim()).filter(Boolean) : [],
     });
   };
 
@@ -245,7 +309,6 @@ function Step2({ product, onNext, onBack }: {
         <p className="text-sm text-muted-foreground mt-1">Paste your CSR and we'll decode it automatically</p>
       </div>
 
-      {/* CSR Input */}
       <div>
         <label className="block text-sm font-medium text-foreground mb-1.5">
           Paste your CSR <span className="text-destructive">*</span>
@@ -253,9 +316,7 @@ function Step2({ product, onNext, onBack }: {
         <textarea
           value={csr}
           onChange={(e) => setCsr(e.target.value)}
-          placeholder="-----BEGIN CERTIFICATE REQUEST-----
-MIICvDCCAaQCAQAwdzELMAkGA1UEBhMCVVMx...
------END CERTIFICATE REQUEST-----"
+          placeholder="-----BEGIN CERTIFICATE REQUEST-----&#10;MIICvDCCAaQCAQAwdzELMAkGA1UEBhMCVVMx...&#10;-----END CERTIFICATE REQUEST-----"
           rows={6}
           className="w-full px-3 py-2.5 rounded-lg border border-input bg-background text-foreground text-sm font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring transition resize-none"
         />
@@ -275,7 +336,6 @@ MIICvDCCAaQCAQAwdzELMAkGA1UEBhMCVVMx...
         )}
       </div>
 
-      {/* Certificate Details */}
       <div className="space-y-4">
         <h3 className="text-sm font-semibold text-foreground">Certificate Details</h3>
 
@@ -294,9 +354,7 @@ MIICvDCCAaQCAQAwdzELMAkGA1UEBhMCVVMx...
 
           {(product.maxSans > 1) && (
             <div className="sm:col-span-2">
-              <label className="block text-sm font-medium text-foreground mb-1.5">
-                Additional Domains (SANs)
-              </label>
+              <label className="block text-sm font-medium text-foreground mb-1.5">Additional Domains (SANs)</label>
               <input
                 value={formData.sans}
                 onChange={(e) => setFormData({ ...formData, sans: e.target.value })}
@@ -418,7 +476,6 @@ function Step3({ product, validity, price, csrData, onConfirm, onBack, isSubmitt
         <p className="text-sm text-muted-foreground mt-1">Please confirm all details before placing your order</p>
       </div>
 
-      {/* Order Summary */}
       <div className="bg-card border border-border rounded-xl divide-y divide-border">
         <div className="p-4">
           <h3 className="text-sm font-semibold text-foreground mb-3">Certificate Details</h3>
@@ -441,7 +498,6 @@ function Step3({ product, validity, price, csrData, onConfirm, onBack, isSubmitt
           </div>
         </div>
 
-        {/* Payment Summary */}
         <div className="p-4">
           <h3 className="text-sm font-semibold text-foreground mb-3">Payment</h3>
           <div className="space-y-2 text-sm">
@@ -456,7 +512,6 @@ function Step3({ product, validity, price, csrData, onConfirm, onBack, isSubmitt
           </div>
         </div>
 
-        {/* Wallet Balance */}
         <div className={cn('p-4', !hasSufficientBalance && 'bg-destructive/5')}>
           <div className="flex items-center justify-between text-sm">
             <div className="flex items-center gap-2">
@@ -505,13 +560,37 @@ export default function NewOrderPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const preselectedProductId = searchParams.get('product');
-  const [step, setStep] = useState(0);
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [selectedValidity, setSelectedValidity] = useState('ONE_YEAR');
-  const [selectedPrice, setSelectedPrice] = useState(0);
-  const [csrData, setCsrData] = useState<any>(null);
+
+  // Load draft on mount
+  const draft = loadDraft();
+
+  const [step, setStep] = useState(draft?.step ?? 0);
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(draft?.selectedProduct ?? null);
+  const [selectedValidity, setSelectedValidity] = useState(draft?.selectedValidity ?? 'ONE_YEAR');
+  const [selectedPrice, setSelectedPrice] = useState(draft?.selectedPrice ?? 0);
+  const [csrData, setCsrData] = useState<any>(draft?.csrData ?? null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [draftRestored, setDraftRestored] = useState(!!draft);
+
+  // Step 2 draft state
+  const [step2Draft, setStep2Draft] = useState(draft?.step2 ?? { csr: '', formData: {} });
+
+  // Save draft whenever key state changes
+  const persistDraft = useCallback(() => {
+    saveDraft({
+      step,
+      selectedProduct,
+      selectedValidity,
+      selectedPrice,
+      csrData,
+      step2: step2Draft,
+    });
+  }, [step, selectedProduct, selectedValidity, selectedPrice, csrData, step2Draft]);
+
+  useEffect(() => {
+    persistDraft();
+  }, [persistDraft]);
 
   const handleStep1Next = (product: Product, validity: string, price: number) => {
     setSelectedProduct(product);
@@ -525,6 +604,10 @@ export default function NewOrderPage() {
     setStep(2);
   };
 
+  const handleStep2DraftChange = (csr: string, formData: any) => {
+    setStep2Draft({ csr, formData });
+  };
+
   const handleConfirm = async () => {
     if (!selectedProduct || !csrData) return;
     setIsSubmitting(true);
@@ -535,6 +618,8 @@ export default function NewOrderPage() {
         validity: selectedValidity,
         ...csrData,
       });
+      // Clear draft on successful order
+      clearDraft();
       navigate(`/orders/${result.data.id}?new=true`);
     } catch (err: any) {
       setError(err?.response?.data?.message || 'Failed to place order. Please try again.');
@@ -542,12 +627,41 @@ export default function NewOrderPage() {
     }
   };
 
+  const handleClearDraft = () => {
+    clearDraft();
+    setStep(0);
+    setSelectedProduct(null);
+    setSelectedValidity('ONE_YEAR');
+    setSelectedPrice(0);
+    setCsrData(null);
+    setStep2Draft({ csr: '', formData: {} });
+    setDraftRestored(false);
+  };
+
   return (
     <div className="max-w-2xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-foreground">New Certificate Order</h1>
-        <p className="text-sm text-muted-foreground mt-1">Follow the steps to order your SSL/TLS certificate</p>
+      <div className="mb-6 flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">New Certificate Order</h1>
+          <p className="text-sm text-muted-foreground mt-1">Follow the steps to order your SSL/TLS certificate</p>
+        </div>
       </div>
+
+      {/* Draft restored banner */}
+      {draftRestored && (
+        <div className="mb-4 flex items-center justify-between gap-3 px-4 py-3 bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-xl text-sm">
+          <div className="flex items-center gap-2 text-blue-700 dark:text-blue-300">
+            <RotateCcw className="w-4 h-4 flex-shrink-0" />
+            Your previous progress has been restored automatically.
+          </div>
+          <button
+            onClick={handleClearDraft}
+            className="text-xs text-blue-500 hover:text-blue-700 dark:hover:text-blue-200 underline whitespace-nowrap"
+          >
+            Start fresh
+          </button>
+        </div>
+      )}
 
       <div className="bg-card border border-border rounded-2xl p-6">
         <StepIndicator current={step} />
@@ -559,9 +673,23 @@ export default function NewOrderPage() {
           </div>
         )}
 
-        {step === 0 && <Step1 onNext={handleStep1Next} preselectedId={preselectedProductId} />}
+        {step === 0 && (
+          <Step1
+            onNext={handleStep1Next}
+            preselectedId={preselectedProductId}
+            initialProduct={selectedProduct}
+            initialValidity={selectedValidity}
+          />
+        )}
         {step === 1 && selectedProduct && (
-          <Step2 product={selectedProduct} onNext={handleStep2Next} onBack={() => setStep(0)} />
+          <Step2
+            product={selectedProduct}
+            onNext={handleStep2Next}
+            onBack={() => setStep(0)}
+            initialCsr={step2Draft.csr}
+            initialFormData={step2Draft.formData && Object.keys(step2Draft.formData).length > 0 ? step2Draft.formData : undefined}
+            onDraftChange={handleStep2DraftChange}
+          />
         )}
         {step === 2 && selectedProduct && csrData && (
           <Step3

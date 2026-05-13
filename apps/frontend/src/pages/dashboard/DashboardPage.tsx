@@ -624,14 +624,20 @@ export default function DashboardPage() {
 
 
       {/* Quick actions */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { label: 'Order a Certificate', desc: 'Start a new SSL/TLS certificate order', to: '/orders/new', icon: Plus },
-          { label: 'View My Certificates', desc: 'Download, track and manage certificates', to: '/certificates', icon: ShieldCheck },
-          { label: 'Convert Format', desc: 'Convert between PEM, PFX, DER, CRT, CER', to: '/convert', icon: RefreshCw },
-        ].map(({ label, desc, to, icon: Icon }) => (
-          <Link key={to} to={to} className="group flex items-start gap-4 p-5 bg-card border border-border rounded-xl hover:border-primary/40 hover:shadow-sm transition">
-            <div className="p-2 rounded-lg bg-primary/10 group-hover:bg-primary/20 transition">
+          { label: 'Order a Certificate', desc: 'Start a new SSL/TLS certificate order', to: '/orders/new', icon: Plus, highlight: true },
+          { label: 'Fund Wallet', desc: 'Top up your wallet balance to place orders', to: '/wallet', icon: Wallet, highlight: false },
+          { label: 'View My Certificates', desc: 'Download, track and manage certificates', to: '/certificates', icon: ShieldCheck, highlight: false },
+          { label: 'Convert Format', desc: 'Convert between PEM, PFX, DER, CRT, CER', to: '/convert', icon: RefreshCw, highlight: false },
+        ].map(({ label, desc, to, icon: Icon, highlight }) => (
+          <Link key={to} to={to} className={cn(
+            'group flex items-start gap-4 p-5 bg-card border rounded-xl hover:shadow-sm transition',
+            highlight
+              ? 'border-primary/40 bg-primary/5 hover:border-primary hover:bg-primary/10'
+              : 'border-border hover:border-primary/40'
+          )}>
+            <div className={cn('p-2 rounded-lg transition', highlight ? 'bg-primary/20 group-hover:bg-primary/30' : 'bg-primary/10 group-hover:bg-primary/20')}>
               <Icon className="w-5 h-5 text-primary" />
             </div>
             <div>

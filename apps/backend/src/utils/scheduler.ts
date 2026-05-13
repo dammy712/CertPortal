@@ -14,14 +14,42 @@ const msUntilMidnight = (): number => {
   return midnight.getTime() - now.getTime();
 };
 
+// ─── Retry wrapper ────────────────────────────────────
+// Retries a job up to `maxAttempts` times with `delayMs` between attempts.
+const withRetry = async (
+  jobName: string,
+  fn: () => Promise<any>,
+  maxAttempts = 3,
+  delayMs = 5 * 60 * 1000  // 5 minutes between retries
+): Promise<void> => {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await fn();
+      return; // success — stop retrying
+    } catch (err) {
+      if (attempt < maxAttempts) {
+        logger.warn(
+          `[${jobName}] Attempt ${attempt}/${maxAttempts} failed — retrying in ${delayMs / 60000} min...`,
+          err
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      } else {
+        logger.error(
+          `[${jobName}] All ${maxAttempts} attempts failed. Will retry at next scheduled run.`,
+          err
+        );
+      }
+    }
+  }
+};
+
+// ─── Expiry Check Job ─────────────────────────────────
 const runJob = async () => {
-  try {
-    logger.info('[Scheduler] Running certificate expiry check...');
+  logger.info('[Scheduler] Running certificate expiry check...');
+  await withRetry('Scheduler', async () => {
     const result = await runExpiryCheck();
     logger.info(`[Scheduler] Done — checked: ${result.checked}, notified: ${result.notified}`);
-  } catch (err) {
-    logger.error('[Scheduler] Expiry check failed:', err);
-  }
+  });
 };
 
 // ─── CA Status Poller ─────────────────────────────────
@@ -72,16 +100,18 @@ export const startScheduler = () => {
 
   logger.info(`[Scheduler] Starting — first run at midnight (in ~${hoursUntil}h), then every 24h`);
 
-  // Run expiry check once 30s after boot
+  // ── Boot-time catch-up run (30s after start) ──────────
+  // Runs immediately on every boot so missed notifications
+  // from server downtime are caught and sent right away.
   setTimeout(runJob, 30_000);
 
-  // Schedule daily at midnight
+  // ── Daily midnight run ─────────────────────────────────
   setTimeout(() => {
     runJob();
     timer = setInterval(runJob, 24 * 60 * 60 * 1000);
   }, msToMidnight);
 
-  // Start CA status poller — every 5 minutes
+  // ── CA status poller — every 5 minutes ────────────────
   logger.info('[CA Poller] Starting — polling every 5 minutes');
   pollTimer = setInterval(runCAPoller, 5 * 60 * 1000);
   // First poll 60s after boot (give CA time to process)
