@@ -88,5 +88,6 @@ router.get('/analytics/growth',               AdminController.getGrowthStats);
 
 // Audit
 router.get('/audit-logs',                     AdminController.getAuditLogs);
+router.get('/compliance-report',              AdminController.getComplianceReport);
 
 export default router;

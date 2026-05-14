@@ -187,38 +187,40 @@ export const reviewDocument = async (
     throw new BadRequestError('This document has already been reviewed.');
   }
 
-  await prisma.kycDocument.update({
-    where: { id: documentId },
-    data: {
-      status: decision,
-      reviewNotes: note,
-      reviewedBy: adminId,
-      reviewedAt: new Date(),
-    },
-  });
+  // ── Atomic: update doc + notification + audit log ──
+  // If any step fails, ALL are rolled back — no partial state.
+  await prisma.$transaction(async (tx) => {
+    await tx.kycDocument.update({
+      where: { id: documentId },
+      data: {
+        status: decision,
+        reviewNotes: note,
+        reviewedBy: adminId,
+        reviewedAt: new Date(),
+      },
+    });
 
-  // Notify user
-  await prisma.notification.create({
-    data: {
-      userId: document.userId,
-      type: 'KYC_UPDATE',
-      channel: 'IN_APP',
-      title: decision === 'APPROVED' ? 'Document Approved ✅' : 'Document Requires Attention',
-      message: decision === 'APPROVED'
-        ? `Your ${document.documentType.replace(/_/g, ' ')} has been approved.`
-        : `Your ${document.documentType.replace(/_/g, ' ')} was not accepted. ${note ? `Reason: ${note}` : 'Please resubmit.'}`,
-      metadata: { documentId, decision, note },
-    },
-  });
+    await tx.notification.create({
+      data: {
+        userId: document.userId,
+        type: 'KYC_UPDATE',
+        channel: 'IN_APP',
+        title: decision === 'APPROVED' ? 'Document Approved ✅' : 'Document Requires Attention',
+        message: decision === 'APPROVED'
+          ? `Your ${document.documentType.replace(/_/g, ' ')} has been approved.`
+          : `Your ${document.documentType.replace(/_/g, ' ')} was not accepted. ${note ? `Reason: ${note}` : 'Please resubmit.'}`,
+        metadata: { documentId, decision, note },
+      },
+    });
 
-  // Audit log
-  await prisma.auditLog.create({
-    data: {
-      userId: adminId,
-      action: decision === 'APPROVED' ? 'KYC_APPROVED' : 'KYC_REJECTED',
-      resourceId: documentId,
-      metadata: { targetUserId: document.userId, note },
-    },
+    await tx.auditLog.create({
+      data: {
+        userId: adminId,
+        action: decision === 'APPROVED' ? 'KYC_APPROVED' : 'KYC_REJECTED',
+        resourceId: documentId,
+        metadata: { targetUserId: document.userId, note },
+      },
+    });
   });
 
   logger.info(`KYC document ${decision.toLowerCase()}: ${documentId} by admin ${adminId}`);
