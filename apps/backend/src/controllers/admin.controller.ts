@@ -236,3 +236,19 @@ export const serveKycFile = async (req: Request, res: Response, next: NextFuncti
     fs.createReadStream(filePath).pipe(res);
   } catch (e) { next(e); }
 };
+
+export const getComplianceReport = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { from, to, format } = req.query as { from?: string; to?: string; format?: string };
+    const { generateComplianceReport } = await import('../services/compliance.report');
+    const result = await generateComplianceReport({ from, to, format: format as 'json' | 'csv' });
+
+    if (format === 'csv' && result.csv) {
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="compliance-report-${Date.now()}.csv"`);
+      return res.send(result.csv);
+    }
+
+    return sendSuccess(res, result.summary, 'Compliance report generated.');
+  } catch (e) { next(e); }
+};

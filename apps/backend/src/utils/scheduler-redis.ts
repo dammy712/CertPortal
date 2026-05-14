@@ -1,3 +1,13 @@
+/**
+ * scheduler.ts — Reliable job scheduler with Redis-based distributed locking.
+ *
+ * Redis locking ensures only ONE instance runs the expiry job at a time,
+ * even when multiple backend instances are running (horizontal scaling).
+ *
+ * If Redis is unavailable, the scheduler falls back to running without
+ * locking — safe for single-instance deployments.
+ */
+
 import { runExpiryCheck } from '../services/monitoring.service';
 import { pollCAStatus } from '../services/issuance.service';
 import { prisma } from './prisma';
@@ -28,17 +38,19 @@ const getRedisClient = async () => {
 };
 
 // ─── Distributed lock ─────────────────────────────────
+// Uses Redis SET NX EX to acquire a lock.
+// Only one instance can hold the lock at a time.
 const LOCK_KEY = 'certportal:scheduler:expiry-check:lock';
-const LOCK_TTL = 10 * 60;
+const LOCK_TTL = 10 * 60; // 10 minutes max — prevents stale locks
 
 const acquireLock = async (): Promise<boolean> => {
   const client = await getRedisClient();
-  if (!client) return true;
+  if (!client) return true; // No Redis — allow run (single instance)
   try {
     const result = await client.set(LOCK_KEY, '1', { NX: true, EX: LOCK_TTL });
     return result === 'OK';
   } catch {
-    return true;
+    return true; // Redis error — allow run
   }
 };
 
@@ -77,6 +89,7 @@ const runJob = async () => {
     logger.info('[Scheduler] Another instance is running the expiry check — skipping.');
     return;
   }
+
   try {
     logger.info('[Scheduler] Running certificate expiry check...');
     await withRetry('Scheduler', async () => {
@@ -96,7 +109,9 @@ const runCAPoller = async () => {
       select: { id: true, orderNumber: true },
       take: 50,
     });
+
     if (pendingOrders.length === 0) return;
+
     logger.info(`[CA Poller] Checking ${pendingOrders.length} pending order(s)...`);
     let issued = 0;
     for (const order of pendingOrders) {
@@ -124,14 +139,22 @@ const msUntilMidnight = (): number => {
 // ─── Start scheduler ──────────────────────────────────
 export const startScheduler = () => {
   if (timer) return;
+
   const msToMidnight = msUntilMidnight();
   const hoursUntil = Math.round(msToMidnight / 1000 / 60 / 60 * 10) / 10;
+
   logger.info(`[Scheduler] Starting — first run at midnight (in ~${hoursUntil}h), then every 24h`);
+
+  // Boot-time catch-up run (30s after start)
   setTimeout(runJob, 30_000);
+
+  // Daily midnight run
   setTimeout(() => {
     runJob();
     timer = setInterval(runJob, 24 * 60 * 60 * 1000);
   }, msToMidnight);
+
+  // CA poller — every 5 minutes
   logger.info('[CA Poller] Starting — polling every 5 minutes');
   pollTimer = setInterval(runCAPoller, 5 * 60 * 1000);
   setTimeout(runCAPoller, 60_000);
